@@ -361,43 +361,270 @@ class rh {
 
   async send(t: string): Promise<v0_8.Types.ServerToClientMessage[]> {
     try {
-      // If env vars are missing, show error
-      if (this.#envError) {
-        return this.#createErrorResponse(this.#envError);
+      // Read env vars
+      const stackBase = import.meta.env.VITE_RELEVANCE_STACK_BASE;
+      const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID;
+      const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY;
+      const toolId = import.meta.env.VITE_RELEVANCE_TOOL_ID;
+      const authHeader = `${projectId}:${apiKey}`;
+
+      // Validate env vars
+      if (!stackBase || !projectId || !apiKey || !toolId) {
+        const missing = [
+          !stackBase && "VITE_RELEVANCE_STACK_BASE",
+          !projectId && "VITE_RELEVANCE_PROJECT_ID",
+          !apiKey && "VITE_RELEVANCE_API_KEY",
+          !toolId && "VITE_RELEVANCE_TOOL_ID",
+        ]
+          .filter(Boolean)
+          .join(", ");
+        throw new Error(`Missing env vars: ${missing}`);
       }
 
-      if (!this.#config) {
-        return this.#createErrorResponse(
-          "Relevance configuration not available"
-        );
+      // 1. Trigger tool
+      const triggerUrl = `${stackBase}/latest/studios/tools/trigger_async`;
+      const triggerBody = {
+        tool_id: toolId,
+        params: { message: t },
+      };
+      console.log("[RelevanceAgent] Triggering tool at:", triggerUrl);
+      const triggerResp = await fetch(triggerUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeader,
+        },
+        body: JSON.stringify(triggerBody),
+      });
+
+      if (!triggerResp.ok) {
+        throw new Error(`Trigger failed: ${triggerResp.status} ${triggerResp.statusText}`);
       }
 
-      // Parse user input (simple or advanced mode)
-      const params = parseToolParams(t);
-      
-      console.log("[RelevanceAgent] Triggering tool with params:", params);
-      const toolOutput = await triggerAndPollTool(this.#config, params);
-      const assistantText = toolOutput || "No response";
+      const triggerJson = await triggerResp.json();
+      console.log("[RelevanceAgent] Trigger response:", triggerJson);
 
-      console.log("[RelevanceAgent] ✓ Tool output received:", assistantText);
+      const jobId = triggerJson.job_id || triggerJson.id;
+      if (!jobId) {
+        throw new Error("No job_id returned from trigger.");
+      }
+      console.log("[RelevanceAgent] Job ID:", jobId);
 
-      // Parse output if it's JSON to extract payload
-      let payload: any = null;
-      try {
-        payload = JSON.parse(assistantText);
-      } catch {
-        // Not JSON, treat entire string as payload
-        payload = assistantText;
+      // 2. Poll job until complete
+      let jobComplete = false;
+      let jobRespJson: any = null;
+      const jobUrl = `${stackBase}/latest/studios/jobs/${jobId}?ending_update_only=true`;
+      const maxWaitMs = 60000; // 60 second timeout
+      const startTime = Date.now();
+
+      while (!jobComplete && Date.now() - startTime < maxWaitMs) {
+        const jobResp = await fetch(jobUrl, {
+          method: "GET",
+          headers: {
+            Authorization: authHeader,
+          },
+        });
+
+        if (!jobResp.ok) {
+          throw new Error(`Poll failed: ${jobResp.status} ${jobResp.statusText}`);
+        }
+
+        jobRespJson = await jobResp.json();
+
+        // Check for completion
+        if (
+          jobRespJson.type === "complete" ||
+          jobRespJson.status === "complete" ||
+          (jobRespJson.completed && (jobRespJson.completed.type === "complete" || jobRespJson.completed.status === "complete"))
+        ) {
+          jobComplete = true;
+          console.log("[RelevanceAgent] Completion detected.");
+        } else {
+          // Wait before next poll
+          await new Promise((res) => setTimeout(res, 1000));
+        }
       }
 
-      // Convert Relevance payload to A2UI messages
-      const messages = toA2uiMessagesFromRelevance(payload, "Tool Result");
-      console.log("[RelevanceAgent] Rendered A2UI messages with", messages.length, "message(s)");
-      return messages;
-    } catch (e) {
-      const errorText = e instanceof Error ? e.message : String(e);
-      console.error("[RelevanceAgent] Error:", errorText);
-      return this.#createErrorResponse(errorText);
+      if (!jobComplete) {
+        throw new Error("Job polling timed out after 60 seconds.");
+      }
+
+      // 3. Extract payload
+      let payload: any = undefined;
+      if (jobRespJson.completed?.output?.transformed?.payload) {
+        payload = jobRespJson.completed.output.transformed.payload;
+      } else if (
+        jobRespJson.completed?.updates &&
+        Array.isArray(jobRespJson.completed.updates) &&
+        jobRespJson.completed.updates.length > 0
+      ) {
+        const lastUpdate = jobRespJson.completed.updates[jobRespJson.completed.updates.length - 1];
+        if (lastUpdate?.output?.transformed?.payload) {
+          payload = lastUpdate.output.transformed.payload;
+        }
+      }
+
+      if (!payload) {
+        payload = jobRespJson.completed || jobRespJson;
+      }
+
+      console.log("[RelevanceAgent] Extracted payload:", payload);
+
+      // 4. Build A2UI components
+      const components: any[] = [];
+      let componentId = 0;
+      const genId = (prefix: string) => `${prefix}_${++componentId}`;
+
+      // Title
+      const titleText =
+        payload?.title || payload?.dashboard_title || "Dashboard";
+      const titleId = genId("title");
+      components.push({
+        id: titleId,
+        component: {
+          Text: {
+            text: { literalString: titleText },
+            usageHint: "heading",
+          },
+        },
+      });
+
+      // Body
+      let bodyId: string;
+      if (
+        !payload ||
+        !payload.data ||
+        !Array.isArray(payload.data.rows) ||
+        payload.data.rows.length === 0
+      ) {
+        // No rows: show "No rows returned" message
+        bodyId = genId("body_text");
+        let text = "No rows returned";
+        if (payload?.message) {
+          text += `: ${payload.message}`;
+        }
+        components.push({
+          id: bodyId,
+          component: {
+            Text: {
+              text: { literalString: text },
+              usageHint: "body",
+            },
+          },
+        });
+      } else {
+        // Has rows: create Cards for each row
+        const cardIds: string[] = [];
+        payload.data.rows.forEach((row: any, rowIdx: number) => {
+          const cardId = genId(`card_${rowIdx}`);
+          const colId = genId(`col_${rowIdx}`);
+
+          // Create Text components for each key-value pair
+          const textIds: string[] = [];
+          Object.entries(row).forEach(([key, value], textIdx: number) => {
+            const textId = genId(`text_${rowIdx}_${textIdx}`);
+            textIds.push(textId);
+            components.push({
+              id: textId,
+              component: {
+                Text: {
+                  text: { literalString: `${key}: ${value}` },
+                  usageHint: "body",
+                },
+              },
+            });
+          });
+
+          // Create Column for text items
+          components.push({
+            id: colId,
+            component: {
+              Column: {
+                children: textIds,
+              },
+            },
+          });
+
+          // Create Card wrapping the Column
+          components.push({
+            id: cardId,
+            component: {
+              Card: {
+                children: [colId],
+              },
+            },
+          });
+
+          cardIds.push(cardId);
+        });
+
+        // Create body as Column of Cards
+        bodyId = genId("body");
+        components.push({
+          id: bodyId,
+          component: {
+            Column: {
+              children: cardIds,
+            },
+          },
+        });
+      }
+
+      // Root Column
+      const rootId = "root";
+      components.push({
+        id: rootId,
+        component: {
+          Column: {
+            children: [titleId, bodyId],
+          },
+        },
+      });
+
+      console.log("[RelevanceAgent] Component count:", components.length);
+
+      // 5. Return A2UI protocol messages
+      return [
+        {
+          surfaceUpdate: {
+            surfaceId: "@default",
+            components: components,
+          },
+        },
+        {
+          beginRendering: {
+            surfaceId: "@default",
+            root: "root",
+          },
+        },
+      ] as any;
+    } catch (err: any) {
+      console.error("[RelevanceAgent] Error in send:", err);
+      const errorMsg = err?.message || String(err);
+      return [
+        {
+          surfaceUpdate: {
+            surfaceId: "@default",
+            components: [
+              {
+                id: "error",
+                component: {
+                  Text: {
+                    text: { literalString: `Error: ${errorMsg}` },
+                    usageHint: "body",
+                  },
+                },
+              },
+            ],
+          },
+        },
+        {
+          beginRendering: {
+            surfaceId: "@default",
+            root: "error",
+          },
+        },
+      ] as any;
     }
   }
 
