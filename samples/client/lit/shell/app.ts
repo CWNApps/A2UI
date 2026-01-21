@@ -91,10 +91,11 @@ class RelevanceAgent {
       }
 
       const data = await response.json();
+      console.log("Agent Response:", data);
 
       // Extract text from response (try output.answer or output.text)
-      let responseText =
-        data.output?.answer || data.output?.text || JSON.stringify(data);
+      const textResponse = data.output?.answer || data.output?.text || data.answer || "No response text found.";
+      let responseText = textResponse;
 
       // Check if the response contains a JSON component
       let jsonComponent = null;
