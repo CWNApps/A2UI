@@ -60,6 +60,285 @@ import {
 } from "./src/lib/relevanceTool";
 
 /**
+ * Converts a Relevance payload to proper A2UI ServerToClient messages.
+ * Handles tables, metrics, charts, and generic JSON.
+ * Always returns valid A2UI with surfaceUpdate + beginRendering.
+ * Never renders blank - always shows at least a title.
+ */
+function toA2uiMessagesFromRelevance(
+  payload: any,
+  title: string = "Tool Result"
+): v0_8.Types.ServerToClientMessage[] {
+  const components: any[] = [];
+  let componentIds: string[] = [];
+  let contentChildren: string[] = [];
+
+  // Helper to generate unique component ID
+  let idCounter = 0;
+  const genId = (prefix: string) => `${prefix}_${++idCounter}`;
+
+  // Helper to add a component to the list
+  const addComponent = (id: string, component: any) => {
+    components.push({ id, component });
+    return id;
+  };
+
+  // === TITLE (always present) ===
+  const titleId = genId("title");
+  addComponent(titleId, {
+    Text: {
+      text: { literalString: payload?.title || title },
+      usageHint: "heading",
+    },
+  });
+  contentChildren.push(titleId);
+
+  // === PAYLOAD TYPE DETECTION ===
+  const isTable =
+    payload?.component === "table" ||
+    payload?.visualization_type === "table" ||
+    (payload?.data?.rows && Array.isArray(payload.data.rows));
+
+  const isMetric =
+    payload?.component === "metric" ||
+    payload?.visualization_type === "metric";
+
+  const isChart =
+    payload?.component === "chart" ||
+    payload?.visualization_type === "chart";
+
+  const isGraph =
+    payload?.component === "graph" ||
+    payload?.visualization_type === "graph";
+
+  // === TABLE RENDERING ===
+  if (isTable) {
+    const rows: any[] = payload?.data?.rows || [];
+    
+    if (rows.length === 0) {
+      // Empty table: show friendly message + raw payload
+      const emptyMsgId = genId("empty_msg");
+      addComponent(emptyMsgId, {
+        Text: {
+          text: { literalString: "No rows returned. This is normal if the tool was called without data." },
+          usageHint: "body",
+        },
+      });
+      contentChildren.push(emptyMsgId);
+
+      // Show raw payload for debugging
+      if (payload && Object.keys(payload).length > 0) {
+        const debugPayload = JSON.stringify(payload, null, 2);
+        const truncated = debugPayload.length > 2000
+          ? debugPayload.substring(0, 2000) + "\n... (truncated)"
+          : debugPayload;
+
+        const debugId = genId("debug_payload");
+        addComponent(debugId, {
+          Text: {
+            text: { literalString: `Raw payload:\n${truncated}` },
+            usageHint: "code",
+          },
+        });
+        contentChildren.push(debugId);
+      }
+    } else {
+      // Build table-like layout using Row + Column + Text
+      const tableId = genId("table_card");
+      const tableBodyId = genId("table_body");
+      const tableRowIds: string[] = [];
+
+      // Extract header keys
+      const firstRow = rows[0] || {};
+      const headerKeys = Object.keys(firstRow).length > 0 ? Object.keys(firstRow) : ["message"];
+
+      // Header row
+      const headerRowId = genId("table_header_row");
+      const headerCellIds: string[] = [];
+      for (const key of headerKeys) {
+        const cellId = genId("header_cell");
+        addComponent(cellId, {
+          Text: {
+            text: { literalString: key },
+            usageHint: "heading",
+          },
+        });
+        headerCellIds.push(cellId);
+      }
+      addComponent(headerRowId, {
+        Row: { children: headerCellIds },
+      });
+      tableRowIds.push(headerRowId);
+
+      // Data rows (max 50 to avoid overwhelming UI)
+      const maxRows = Math.min(rows.length, 50);
+      for (let i = 0; i < maxRows; i++) {
+        const row = rows[i];
+        const rowId = genId("table_row");
+        const cellIds: string[] = [];
+
+        for (const key of headerKeys) {
+          const value = row[key];
+          const cellId = genId("table_cell");
+          const cellText =
+            typeof value === "object"
+              ? JSON.stringify(value)
+              : String(value ?? "");
+          addComponent(cellId, {
+            Text: {
+              text: { literalString: cellText },
+              usageHint: "body",
+            },
+          });
+          cellIds.push(cellId);
+        }
+
+        addComponent(rowId, { Row: { children: cellIds } });
+        tableRowIds.push(rowId);
+      }
+
+      // Wrap table in Card + Column
+      addComponent(tableBodyId, { Column: { children: tableRowIds } });
+      addComponent(tableId, {
+        Card: {
+          children: [tableBodyId],
+        },
+      });
+      contentChildren.push(tableId);
+
+      // Show row count
+      if (rows.length > maxRows) {
+        const countId = genId("row_count");
+        addComponent(countId, {
+          Text: {
+            text: { literalString: `Showing ${maxRows} of ${rows.length} rows` },
+            usageHint: "hint",
+          },
+        });
+        contentChildren.push(countId);
+      }
+    }
+  }
+  // === METRIC RENDERING ===
+  else if (isMetric) {
+    const metricId = genId("metric_value");
+    const value = payload?.value ?? payload?.metric ?? "N/A";
+    const unit = payload?.unit ? ` ${payload.unit}` : "";
+    addComponent(metricId, {
+      Text: {
+        text: { literalString: `${value}${unit}` },
+        usageHint: "heading",
+      },
+    });
+    contentChildren.push(metricId);
+  }
+  // === CHART RENDERING ===
+  else if (isChart) {
+    const data = payload?.data || {};
+    if (typeof data === "object" && Object.keys(data).length > 0) {
+      // Render as key:value rows
+      const rowIds: string[] = [];
+      for (const [key, val] of Object.entries(data)) {
+        const rowId = genId("chart_row");
+        const keyId = genId("chart_key");
+        const valId = genId("chart_val");
+
+        addComponent(keyId, {
+          Text: { text: { literalString: key }, usageHint: "body" },
+        });
+        addComponent(valId, {
+          Text: { text: { literalString: String(val) }, usageHint: "body" },
+        });
+        addComponent(rowId, { Row: { children: [keyId, valId] } });
+        rowIds.push(rowId);
+      }
+
+      if (rowIds.length > 0) {
+        const chartId = genId("chart_col");
+        addComponent(chartId, { Column: { children: rowIds } });
+        contentChildren.push(chartId);
+      }
+    }
+  }
+  // === GRAPH RENDERING ===
+  else if (isGraph) {
+    const nodes = payload?.nodes || [];
+    const edges = payload?.edges || [];
+    const summaryId = genId("graph_summary");
+    addComponent(summaryId, {
+      Text: {
+        text: { literalString: `Graph: ${nodes.length} nodes, ${edges.length} edges` },
+        usageHint: "body",
+      },
+    });
+    contentChildren.push(summaryId);
+  }
+  // === FALLBACK: RAW PAYLOAD AS TEXT ===
+  else {
+    let displayText = "";
+    if (typeof payload === "string") {
+      displayText = payload;
+    } else if (payload && typeof payload === "object") {
+      displayText = JSON.stringify(payload, null, 2);
+    } else {
+      displayText = String(payload || "No data");
+    }
+
+    // Truncate if too long
+    if (displayText.length > 2000) {
+      displayText = displayText.substring(0, 2000) + "\n... (truncated)";
+    }
+
+    const payloadId = genId("payload_text");
+    addComponent(payloadId, {
+      Text: {
+        text: { literalString: displayText },
+        usageHint: "body",
+      },
+    });
+    contentChildren.push(payloadId);
+  }
+
+  // === BUILD ROOT CONTAINER ===
+  const rootId = "root";
+  const contentId = genId("content_column");
+  addComponent(contentId, { Column: { children: contentChildren } });
+  addComponent(rootId, {
+    Column: {
+      children: [contentId],
+    },
+  });
+
+  // === BUILD COMPONENT ADJACENCY LIST (surfaceUpdate format) ===
+  // Each component includes its children inline as part of the component definition
+  // This is the flat list format expected by A2UI protocol
+  const componentList = components.map((c) => ({
+    id: c.id,
+    component: c.component,
+  }));
+
+  // === RETURN A2UI MESSAGES (proper ordering) ===
+  const messages: v0_8.Types.ServerToClientMessage[] = [
+    // First: surfaceUpdate with all components
+    {
+      surfaceUpdate: {
+        surfaceId: "@default",
+        components: componentList,
+      } as any,
+    },
+    // Second: beginRendering to signal ready
+    {
+      beginRendering: {
+        surfaceId: "@default",
+        root: rootId,
+      } as any,
+    },
+  ];
+
+  return messages;
+}
+
+/**
  * RelevanceAgent - Wrapper for Relevance Tools API
  * Returns A2UI protocol messages
  * Supports both simple mode ({ message: "..." }) and advanced mode (JSON objects)
@@ -102,54 +381,19 @@ class rh {
 
       console.log("[RelevanceAgent] ✓ Tool output received:", assistantText);
 
-      // Parse output if it's JSON
-      let outputContent = assistantText;
+      // Parse output if it's JSON to extract payload
+      let payload: any = null;
       try {
-        const parsed = JSON.parse(assistantText);
-        outputContent = parsed;
+        payload = JSON.parse(assistantText);
       } catch {
-        // Not JSON, use as-is
+        // Not JSON, treat entire string as payload
+        payload = assistantText;
       }
 
-      // Build A2UI response with smart rendering
-      const components: any[] = [
-        {
-          id: "t1",
-          component: {
-            Text: {
-              text: { literalString: 
-                typeof outputContent === "string"
-                  ? outputContent
-                  : JSON.stringify(outputContent, null, 2)
-              },
-              usageHint: "body",
-            },
-          },
-        },
-      ];
-
-      const result: any[] = [
-        {
-          beginRendering: {
-            surfaceId: "@default",
-            root: "root",
-            components: [
-              {
-                id: "root",
-                component: {
-                  Column: {
-                    children: ["t1"],
-                  },
-                },
-              },
-              ...components,
-            ],
-          },
-        },
-      ];
-
-      console.log("[RelevanceAgent] Rendering response");
-      return result;
+      // Convert Relevance payload to A2UI messages
+      const messages = toA2uiMessagesFromRelevance(payload, "Tool Result");
+      console.log("[RelevanceAgent] Rendered A2UI messages with", messages.length, "message(s)");
+      return messages;
     } catch (e) {
       const errorText = e instanceof Error ? e.message : String(e);
       console.error("[RelevanceAgent] Error:", errorText);
