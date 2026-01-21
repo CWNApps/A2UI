@@ -47,6 +47,110 @@ import { config as restaurantConfig } from "./configs/restaurant.js";
 import { config as contactsConfig } from "./configs/contacts.js";
 import { styleMap } from "lit/directives/style-map.js";
 
+/**
+ * RelevanceAgent - Handles communication with Relevance AI API
+ */
+class RelevanceAgent {
+  async send(
+    message: string
+  ): Promise<v0_8.Types.ServerToClientMessage[]> {
+    const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID;
+    const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY;
+    const agentId = import.meta.env.VITE_AGENT_ID;
+
+    if (!projectId || !apiKey || !agentId) {
+      throw new Error(
+        "Missing required environment variables: VITE_RELEVANCE_PROJECT_ID, VITE_RELEVANCE_API_KEY, or VITE_AGENT_ID"
+      );
+    }
+
+    const authHeader = `${projectId}:${apiKey}`;
+
+    try {
+      const response = await fetch(
+        "https://api-bcbe5a.stack.tryrelevance.com/latest/agents/trigger",
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            message: message,
+            agent_id: agentId,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`API returned status ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      // Extract text from response (try output.answer or output.text)
+      let responseText =
+        data.output?.answer || data.output?.text || JSON.stringify(data);
+
+      // Check if the response contains a JSON component
+      let jsonComponent = null;
+      if (typeof responseText === "string") {
+        // Look for JSON component markers
+        const jsonMatch = responseText.match(
+          /<json-component>([\s\S]*?)<\/json-component>/
+        );
+        if (jsonMatch) {
+          try {
+            jsonComponent = JSON.parse(jsonMatch[1]);
+            // Remove the JSON component from the text
+            responseText = responseText
+              .replace(/<json-component>[\s\S]*?<\/json-component>/, "")
+              .trim();
+          } catch {
+            // If JSON parsing fails, keep the original text
+          }
+        }
+      }
+
+      // Build the response messages
+      const messages: v0_8.Types.ServerToClientMessage[] = [];
+
+      // Add text message if there's response text
+      if (responseText) {
+        messages.push({
+          kind: "message",
+          parts: [
+            {
+              kind: "text",
+              text: responseText,
+            },
+          ],
+        } as v0_8.Types.ServerToClientMessage);
+      }
+
+      // Add JSON component as a separate message if extracted
+      if (jsonComponent) {
+        messages.push({
+          kind: "message",
+          parts: [
+            {
+              kind: "data",
+              data: jsonComponent,
+              mimeType: "application/json+a2aui",
+            },
+          ],
+        } as v0_8.Types.ServerToClientMessage);
+      }
+
+      return messages;
+    } catch (error) {
+      throw new Error(
+        `Failed to send message to Relevance AI: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+}
+
 const configs: Record<string, AppConfig> = {
   restaurant: restaurantConfig,
   contacts: contactsConfig,
@@ -268,6 +372,7 @@ export class A2UILayoutEditor extends SignalWatcher(LitElement) {
 
   #processor = v0_8.Data.createSignalA2uiMessageProcessor();
   #a2uiClient = new A2UIClient();
+  #relevanceAgent = new RelevanceAgent();
   #snackbar: Snackbar | undefined = undefined;
   #pendingSnackbarMessages: Array<{
     message: SnackbarMessage;
@@ -407,8 +512,25 @@ export class A2UILayoutEditor extends SignalWatcher(LitElement) {
     try {
       this.#requesting = true;
       this.#startLoadingAnimation();
-      const response = this.#a2uiClient.send(message);
-      await response;
+
+      let response: v0_8.Types.ServerToClientMessage[];
+
+      // Use RelevanceAgent if serverUrl is empty, otherwise use A2UIClient
+      if (this.config.serverUrl === "") {
+        if (typeof message === "string") {
+          response = await this.#relevanceAgent.send(message);
+        } else if ("userAction" in message) {
+          // For user actions, convert to text message
+          response = await this.#relevanceAgent.send(
+            JSON.stringify(message.userAction)
+          );
+        } else {
+          response = [];
+        }
+      } else {
+        response = await this.#a2uiClient.send(message);
+      }
+
       this.#requesting = false;
       this.#stopLoadingAnimation();
 
