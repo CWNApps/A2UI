@@ -55,12 +55,26 @@ import { styleMap } from "lit/directives/style-map.js";
 class rh {
   async send(t: string): Promise<v0_8.Types.ServerToClientMessage[]> {
     try {
-      // 1. Same connection logic
-      const projectId = "a9356a25298d-4f6b-9ccb-e98a9ff058b6";
-      const apiKey = "sk-YTczM2MwZjUtNTM1OC00ZTI1LTg1ODItYjAyNjQxYWU3ZGZj";
-      const agentId = "6635b0a2-03ce-4c80-9e44-4722c0c6752f";
+      // Read credentials from Vite environment variables
+      const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID;
+      const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY;
+      const agentId = import.meta.env.VITE_RELEVANCE_AGENT_ID;
       
-      const response = await fetch("https://api-bcbe5a.stack.tryrelevance.com/latest/agents/trigger", {
+      // Validate that all required env vars are present
+      const missingVars: string[] = [];
+      if (!projectId) missingVars.push("VITE_RELEVANCE_PROJECT_ID");
+      if (!apiKey) missingVars.push("VITE_RELEVANCE_API_KEY");
+      if (!agentId) missingVars.push("VITE_RELEVANCE_AGENT_ID");
+      
+      if (missingVars.length > 0) {
+        const missingMsg = missingVars.join(", ");
+        console.error(`Missing environment variables: ${missingMsg}`);
+        return this.#createErrorResponse(
+          `Missing environment variables: ${missingMsg}. Please set these in your .env file.`
+        );
+      }
+      
+      const response = await fetch("https://api-d7b62b.stack.tryrelevance.com/latest/agents/trigger", {
         method: "POST",
         headers: {
           "Authorization": `${projectId}:${apiKey}`,
@@ -72,71 +86,86 @@ class rh {
         })
       });
 
-      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.status} ${response.statusText}`);
+      }
 
       const data = await response.json();
       console.log("RAW AGENT RESPONSE:", data);
 
-      let text = data.output?.answer || data.output?.text || data.answer || "No response";
+      // Extract assistant text from various possible response shapes
+      let assistantText = data.output?.answer || data.output?.text || data.answer || "No response";
       
-      // 2. Protocol Translation Logic
-      // Look for <json-component> or use the text as a Text Component
+      // Normalize to string if it's somehow an object
+      if (typeof assistantText !== "string") {
+        assistantText = JSON.stringify(assistantText);
+      }
+      
+      // Extract JSON component if present
       let visualData: any = null;
-      const jsonMatch = text.match(/<json-component>([\s\S]*?)<\/json-component>/);
+      const jsonMatch = assistantText.match(/<json-component>([\s\S]*?)<\/json-component>/);
       if (jsonMatch) {
         try {
           visualData = JSON.parse(jsonMatch[1]);
           console.log("EXTRACTED VISUAL DATA:", visualData);
+          // Remove the json-component tags from the text
+          assistantText = assistantText.replace(/<json-component>[\s\S]*?<\/json-component>/, "").trim();
         } catch (e) {
           console.error("Failed to parse json-component:", e);
+          visualData = null;
         }
-        text = text.replace(/<json-component>[\s\S]*?<\/json-component>/, "").trim();
       }
 
-      // 3. Construct the A2UI Protocol Envelope
+      // If no text remains, keep a fallback
+      if (!assistantText) {
+        assistantText = "Response processed";
+      }
+
+      // Build components array
+      const componentIds: string[] = [];
       const components: any[] = [];
       
       // Always add the text response as a Text component
+      const textId = "t1";
       components.push({
-        id: "text-id",
+        id: textId,
         component: {
           Text: {
-            text: { literalString: text },
+            text: { literalString: assistantText },
             usageHint: "body"
           }
         }
       });
+      componentIds.push(textId);
 
-      // If there is a table/graph, add it to the envelope
+      // If there is a visual component, add it to the envelope
       if (visualData) {
-        const type = visualData.component || visualData.ui_type || "Table";
-        const capitalizedType = type.charAt(0).toUpperCase() + type.slice(1);
+        const componentId = "c1";
         components.push({
-          id: "visual-id",
-          component: {
-            [capitalizedType]: visualData
-          }
+          id: componentId,
+          component: visualData
         });
+        componentIds.push(componentId);
       }
 
       console.log("CONSTRUCTED COMPONENTS:", components);
 
-      // 4. Return the "beginRendering" instruction
+      // Build the root layout component
+      const rootComponent = {
+        id: "root",
+        component: {
+          Column: {
+            children: componentIds
+          }
+        }
+      };
+
+      // Return the "beginRendering" instruction
       const result: any[] = [{
         beginRendering: {
           surfaceId: "@default",
-          root: "root-container",
-          components: [
-            {
-              id: "root-container",
-              component: {
-                Column: {
-                  children: components.map(c => c.id)
-                }
-              }
-            },
-            ...components
-          ]
+          root: "root",
+          components: [rootComponent, ...components]
         }
       }];
 
@@ -144,35 +173,39 @@ class rh {
       return result;
 
     } catch (e) {
-      console.error("AGENT ERROR:", e);
+      console.error("AGENT ERROR (full details):", e);
       const errorText = e instanceof Error ? e.message : String(e);
-      
-      return [{
-        beginRendering: {
-          surfaceId: "@default",
-          root: "root-container",
-          components: [
-            {
-              id: "root-container",
-              component: {
-                Column: {
-                  children: ["error-text-id"]
-                }
-              }
-            },
-            {
-              id: "error-text-id",
-              component: {
-                Text: {
-                  text: { literalString: `Error: ${errorText}` },
-                  usageHint: "body"
-                }
+      return this.#createErrorResponse(errorText);
+    }
+  }
+
+  #createErrorResponse(message: string): v0_8.Types.ServerToClientMessage[] {
+    console.error(`Error response: ${message}`);
+    return [{
+      beginRendering: {
+        surfaceId: "@default",
+        root: "root",
+        components: [
+          {
+            id: "root",
+            component: {
+              Column: {
+                children: ["error-text-id"]
               }
             }
-          ]
-        }
-      }] as any;
-    }
+          },
+          {
+            id: "error-text-id",
+            component: {
+              Text: {
+                text: { literalString: `Error: ${message}` },
+                usageHint: "body"
+              }
+            }
+          }
+        ]
+      }
+    }] as any;
   }
 }
 
