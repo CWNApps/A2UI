@@ -362,16 +362,16 @@ class rh {
   async send(t: string): Promise<v0_8.Types.ServerToClientMessage[]> {
     try {
       // Read env vars
-      const stackBase = import.meta.env.VITE_RELEVANCE_STACK_BASE;
+      const rawStackBase = import.meta.env.VITE_RELEVANCE_STACK_BASE;
       const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID;
       const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY;
       const toolId = import.meta.env.VITE_RELEVANCE_TOOL_ID;
       const authHeader = `${projectId}:${apiKey}`;
 
       // Validate env vars
-      if (!stackBase || !projectId || !apiKey || !toolId) {
+      if (!rawStackBase || !projectId || !apiKey || !toolId) {
         const missing = [
-          !stackBase && "VITE_RELEVANCE_STACK_BASE",
+          !rawStackBase && "VITE_RELEVANCE_STACK_BASE",
           !projectId && "VITE_RELEVANCE_PROJECT_ID",
           !apiKey && "VITE_RELEVANCE_API_KEY",
           !toolId && "VITE_RELEVANCE_TOOL_ID",
@@ -381,8 +381,15 @@ class rh {
         throw new Error(`Missing env vars: ${missing}`);
       }
 
+      // Normalize base URL: ensure exactly one "/latest" at the end
+      const normalizeRelevanceBase = (raw: string): string => {
+        const clean = raw.replace(/\/+$/, "");
+        return clean.endsWith("/latest") ? clean : `${clean}/latest`;
+      };
+      const stackBase = normalizeRelevanceBase(rawStackBase);
+
       // 1. Trigger tool
-      const triggerUrl = `${stackBase}/latest/studios/tools/trigger_async`;
+      const triggerUrl = `${stackBase}/studios/${toolId}/trigger_async`;
       const triggerBody = {
         tool_id: toolId,
         params: { message: t },
@@ -413,7 +420,7 @@ class rh {
       // 2. Poll job until complete
       let jobComplete = false;
       let jobRespJson: any = null;
-      const jobUrl = `${stackBase}/latest/studios/jobs/${jobId}?ending_update_only=true`;
+      const jobUrl = `${stackBase}/studios/${toolId}/async_poll/${jobId}?ending_update_only=true`;
       const maxWaitMs = 60000; // 60 second timeout
       const startTime = Date.now();
 
