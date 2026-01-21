@@ -84,27 +84,38 @@ class RelevanceAgent {
       }
 
       const data = await response.json();
-      console.log("Agent Data:", data);
 
-      // Robust Extraction
-      const output = data.output || {};
-      const text =
-        output.answer ||
-        output.text ||
-        data.answer ||
-        JSON.stringify(data);
+      // Step 1: Log raw response for debugging
+      console.log("RAW AGENT RESPONSE:", data);
 
-      // Build the response messages
+      // Step 2: Aggressively hunt for text content
+      let content = "";
+      if (data.output?.answer) {
+        content = data.output.answer;
+      } else if (data.output?.text) {
+        content = data.output.text;
+      } else if (data.answer) {
+        content = data.answer;
+      } else if (data.text) {
+        content = data.text;
+      } else if (typeof data.output === "string") {
+        content = data.output;
+      } else {
+        content = JSON.stringify(data);
+      }
+
+      console.log("EXTRACTED CONTENT:", content);
+
+      // Step 3: Build the response messages in exact format expected
       const messages: v0_8.Types.ServerToClientMessage[] = [];
 
-      // Add text message
-      if (text) {
+      if (content) {
         messages.push({
           kind: "message",
           parts: [
             {
               kind: "text",
-              text: text,
+              text: content,
             },
           ],
         } as v0_8.Types.ServerToClientMessage);
@@ -112,14 +123,14 @@ class RelevanceAgent {
 
       return messages;
     } catch (e) {
-      console.error(e);
+      console.error("AGENT ERROR:", e);
       return [
         {
           kind: "message",
           parts: [
             {
               kind: "text",
-              text: "Error connecting to Agent. Check console.",
+              text: `Error connecting to Agent: ${e instanceof Error ? e.message : String(e)}`,
             },
           ],
         } as v0_8.Types.ServerToClientMessage,
