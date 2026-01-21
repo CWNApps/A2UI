@@ -49,163 +49,228 @@ import { config as contactsConfig } from "./configs/contacts.js";
 import { styleMap } from "lit/directives/style-map.js";
 
 /**
- * RelevanceAgent - Handles communication with Relevance AI API
- * Translates Relevance responses to A2UI protocol
+ * Relevance Tools API Client - Interactive trigger with async polling
+ * Uses Tools for immediate UI response (not Agents which are async-only)
  */
-class rh {
-  async send(t: string): Promise<v0_8.Types.ServerToClientMessage[]> {
+class RelevanceToolsClient {
+  #stackBase: string;
+  #projectId: string;
+  #apiKey: string;
+  #toolId: string;
+
+  constructor() {
+    this.#stackBase = import.meta.env.VITE_RELEVANCE_STACK_BASE || "";
+    this.#projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID || "";
+    this.#apiKey = import.meta.env.VITE_RELEVANCE_API_KEY || "";
+    this.#toolId = import.meta.env.VITE_RELEVANCE_TOOL_ID || "";
+  }
+
+  private validateConfig(): string[] {
+    const missing: string[] = [];
+    if (!this.#stackBase) missing.push("VITE_RELEVANCE_STACK_BASE");
+    if (!this.#projectId) missing.push("VITE_RELEVANCE_PROJECT_ID");
+    if (!this.#apiKey) missing.push("VITE_RELEVANCE_API_KEY");
+    if (!this.#toolId) missing.push("VITE_RELEVANCE_TOOL_ID");
+    return missing;
+  }
+
+  async runTool(promptText: string): Promise<string> {
+    const missingVars = this.validateConfig();
+    if (missingVars.length > 0) {
+      const msg = `Missing env vars: ${missingVars.join(", ")}`;
+      console.error(msg);
+      throw new Error(msg);
+    }
+
     try {
-      // Read credentials from Vite environment variables
-      const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID;
-      const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY;
-      const agentId = import.meta.env.VITE_RELEVANCE_AGENT_ID;
+      // Step 1: Trigger async tool
+      console.log("[Relevance Tool] Triggering async tool...");
+      const triggerUrl = `${this.#stackBase}/studios/${this.#toolId}/trigger_async`;
       
-      // Validate that all required env vars are present
-      const missingVars: string[] = [];
-      if (!projectId) missingVars.push("VITE_RELEVANCE_PROJECT_ID");
-      if (!apiKey) missingVars.push("VITE_RELEVANCE_API_KEY");
-      if (!agentId) missingVars.push("VITE_RELEVANCE_AGENT_ID");
-      
-      if (missingVars.length > 0) {
-        const missingMsg = missingVars.join(", ");
-        console.error(`Missing environment variables: ${missingMsg}`);
-        return this.#createErrorResponse(
-          `Missing environment variables: ${missingMsg}. Please set these in your .env file.`
-        );
-      }
-      
-      const response = await fetch("https://api-d7b62b.stack.tryrelevance.com/latest/agents/trigger", {
+      const triggerResponse = await fetch(triggerUrl, {
         method: "POST",
         headers: {
-          "Authorization": `${projectId}:${apiKey}`,
-          "Content-Type": "application/json"
+          "Authorization": this.#apiKey,
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          message: { role: "user", content: t },
-          agent_id: agentId
-        })
+          params: { query: promptText },
+          project: this.#projectId,
+        }),
       });
 
-      if (!response.ok) {
-        throw new Error(`API Error: ${response.status} ${response.statusText}`);
+      const triggerText = await triggerResponse.text();
+      if (!triggerResponse.ok) {
+        console.error(`[Relevance Tool] Trigger failed: ${triggerResponse.status}`, triggerText);
+        throw new Error(
+          `Tool trigger failed: ${triggerResponse.status} ${triggerText || triggerResponse.statusText}`
+        );
       }
 
-      const data = await response.json();
-      console.log("RAW AGENT RESPONSE:", data);
-
-      // Extract assistant text from various possible response shapes
-      let assistantText = data.output?.answer || data.output?.text || data.answer || "No response";
-      
-      // Normalize to string if it's somehow an object
-      if (typeof assistantText !== "string") {
-        assistantText = JSON.stringify(assistantText);
-      }
-      
-      // Extract JSON component if present
-      let visualData: any = null;
-      const jsonMatch = assistantText.match(/<json-component>([\s\S]*?)<\/json-component>/);
-      if (jsonMatch) {
-        try {
-          visualData = JSON.parse(jsonMatch[1]);
-          console.log("EXTRACTED VISUAL DATA:", visualData);
-          // Remove the json-component tags from the text
-          assistantText = assistantText.replace(/<json-component>[\s\S]*?<\/json-component>/, "").trim();
-        } catch (e) {
-          console.error("Failed to parse json-component:", e);
-          visualData = null;
-        }
+      let triggerData: any;
+      try {
+        triggerData = triggerText ? JSON.parse(triggerText) : {};
+      } catch (e) {
+        console.error("[Relevance Tool] Failed to parse trigger response:", triggerText);
+        throw new Error(`Invalid trigger response format: ${triggerText}`);
       }
 
-      // If no text remains, keep a fallback
-      if (!assistantText) {
-        assistantText = "Response processed";
+      const jobId = triggerData.job_id;
+      if (!jobId) {
+        console.error("[Relevance Tool] No job_id in response:", triggerData);
+        throw new Error("No job_id returned from tool trigger");
       }
 
-      // Build components array
-      const componentIds: string[] = [];
-      const components: any[] = [];
-      
-      // Always add the text response as a Text component
-      const textId = "t1";
-      components.push({
-        id: textId,
-        component: {
-          Text: {
-            text: { literalString: assistantText },
-            usageHint: "body"
-          }
-        }
-      });
-      componentIds.push(textId);
+      console.log(`[Relevance Tool] Job started: ${jobId}`);
 
-      // If there is a visual component, add it to the envelope
-      if (visualData) {
-        const componentId = "c1";
-        components.push({
-          id: componentId,
-          component: visualData
+      // Step 2: Poll for completion
+      const pollUrl = `${this.#stackBase}/studios/${this.#toolId}/async_poll/${jobId}?ending_update_only=true`;
+      const maxWaitMs = 60000; // 60 seconds
+      const pollIntervalMs = 500; // Poll every 500ms
+      const startTime = Date.now();
+
+      while (Date.now() - startTime < maxWaitMs) {
+        console.log(`[Relevance Tool] Polling... (${Math.round((Date.now() - startTime) / 1000)}s)`);
+        
+        const pollResponse = await fetch(pollUrl, {
+          method: "GET",
+          headers: {
+            "Authorization": this.#apiKey,
+          },
         });
-        componentIds.push(componentId);
+
+        const pollText = await pollResponse.text();
+        if (!pollResponse.ok) {
+          console.error(`[Relevance Tool] Poll failed: ${pollResponse.status}`, pollText);
+          throw new Error(
+            `Poll failed: ${pollResponse.status} ${pollText || pollResponse.statusText}`
+          );
+        }
+
+        let pollData: any;
+        try {
+          pollData = pollText ? JSON.parse(pollText) : {};
+        } catch (e) {
+          console.error("[Relevance Tool] Failed to parse poll response:", pollText);
+          throw new Error(`Invalid poll response format: ${pollText}`);
+        }
+
+        console.log("[Relevance Tool] Poll response:", pollData);
+
+        // Check for completion
+        if (pollData.status === "completed" || pollData.status === "done") {
+          const output = pollData.output || "";
+          console.log("[Relevance Tool] Completed with output:", output);
+          return String(output);
+        }
+
+        if (pollData.error) {
+          throw new Error(`Tool execution failed: ${pollData.error}`);
+        }
+
+        // Wait before next poll
+        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
       }
 
-      console.log("CONSTRUCTED COMPONENTS:", components);
-
-      // Build the root layout component
-      const rootComponent = {
-        id: "root",
-        component: {
-          Column: {
-            children: componentIds
-          }
-        }
-      };
-
-      // Return the "beginRendering" instruction
-      const result: any[] = [{
-        beginRendering: {
-          surfaceId: "@default",
-          root: "root",
-          components: [rootComponent, ...components]
-        }
-      }];
-
-      console.log("RETURNING A2UI PROTOCOL:", result);
-      return result;
-
+      throw new Error(`Tool execution timed out after ${maxWaitMs / 1000} seconds`);
     } catch (e) {
-      console.error("AGENT ERROR (full details):", e);
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[Relevance Tool] Error:", msg);
+      throw new Error(msg);
+    }
+  }
+}
+
+/**
+ * RelevanceAgent - Wrapper for Relevance Tools API
+ * Returns A2UI protocol messages
+ */
+class rh {
+  #toolsClient: RelevanceToolsClient;
+
+  constructor() {
+    this.#toolsClient = new RelevanceToolsClient();
+  }
+
+  async send(t: string): Promise<v0_8.Types.ServerToClientMessage[]> {
+    try {
+      // Use the Tools API which returns output immediately
+      const toolOutput = await this.#toolsClient.runTool(t);
+      const assistantText = toolOutput || "No response";
+
+      console.log("[RelevanceAgent] Tool output received:", assistantText);
+
+      // Build A2UI response
+      const components: any[] = [
+        {
+          id: "t1",
+          component: {
+            Text: {
+              text: { literalString: assistantText },
+              usageHint: "body",
+            },
+          },
+        },
+      ];
+
+      const result: any[] = [
+        {
+          beginRendering: {
+            surfaceId: "@default",
+            root: "root",
+            components: [
+              {
+                id: "root",
+                component: {
+                  Column: {
+                    children: ["t1"],
+                  },
+                },
+              },
+              ...components,
+            ],
+          },
+        },
+      ];
+
+      console.log("[RelevanceAgent] Returning A2UI message:", result);
+      return result;
+    } catch (e) {
       const errorText = e instanceof Error ? e.message : String(e);
+      console.error("[RelevanceAgent] Error:", errorText);
       return this.#createErrorResponse(errorText);
     }
   }
 
   #createErrorResponse(message: string): v0_8.Types.ServerToClientMessage[] {
-    console.error(`Error response: ${message}`);
-    return [{
-      beginRendering: {
-        surfaceId: "@default",
-        root: "root",
-        components: [
-          {
-            id: "root",
-            component: {
-              Column: {
-                children: ["error-text-id"]
-              }
-            }
-          },
-          {
-            id: "error-text-id",
-            component: {
-              Text: {
-                text: { literalString: `Error: ${message}` },
-                usageHint: "body"
-              }
-            }
-          }
-        ]
-      }
-    }] as any;
+    console.error(`[RelevanceAgent] Error response: ${message}`);
+    return [
+      {
+        beginRendering: {
+          surfaceId: "@default",
+          root: "root",
+          components: [
+            {
+              id: "root",
+              component: {
+                Column: {
+                  children: ["error-text-id"],
+                },
+              },
+            },
+            {
+              id: "error-text-id",
+              component: {
+                Text: {
+                  text: { literalString: `Error: ${message}` },
+                  usageHint: "body",
+                },
+              },
+            },
+          ],
+        },
+      },
+    ] as any;
   }
 }
 

@@ -8,28 +8,41 @@ This is a UI to generate and visualize A2UI responses.
 
 ## Configuration
 
-### For Relevance AI Integration
+### For Relevance AI Integration (Recommended: Tools API)
 
-The shell can be configured to use Relevance AI agents directly. To enable this:
+The shell can be configured to use **Relevance AI Tools** for interactive UI responses. This is preferred over Agents API because:
+- ✅ Agents API triggers are async with no direct output response
+- ✅ Tools triggers return output immediately, ideal for interactive UIs
+- ✅ The UI will never be blank waiting for responses
+
+#### Setup Steps:
 
 1. **Get your Relevance AI credentials:**
-   - Log in to your Relevance AI project
-   - Navigate to your project settings
-   - Copy your **Project ID**, **API Key**, and **Agent ID**
+   - Log in to your Relevance AI project dashboard
+   - Navigate to **Settings** → copy your **Project ID**
+   - Navigate to **API Keys** → copy your **API Key** (keep this secret!)
+   - Navigate to **Studios/Tools** → find your interactive tool/studio and copy its **ID**
+   - Find your **Stack Base URL** (typically `https://api-xxxxx.stack.tryrelevance.com/latest`)
 
-2. **Create a `.env` file** in this directory (copy from `.env.example` if needed):
+2. **Create a `.env` file** in this directory:
    ```bash
    cp .env.example .env
    ```
 
 3. **Fill in your credentials in `.env`:**
-   ```
+   ```env
+   VITE_RELEVANCE_STACK_BASE=https://api-xxxxx.stack.tryrelevance.com/latest
    VITE_RELEVANCE_PROJECT_ID=your_project_id
    VITE_RELEVANCE_API_KEY=your_api_key
-   VITE_RELEVANCE_AGENT_ID=your_agent_id
+   VITE_RELEVANCE_TOOL_ID=your_tool_studio_id
    ```
 
 4. **Keep your `.env` file private** - never commit it to version control!
+
+#### Why Tools Instead of Agents?
+
+- **Agents API**: Triggers async jobs with no direct HTTP response. Output goes to a separate destination. Not suitable for interactive UIs.
+- **Tools API**: Supports both sync and async polling. Perfect for interactive web UIs where users expect immediate feedback.
 
 ## Running
 
