@@ -50,125 +50,128 @@ import { styleMap } from "lit/directives/style-map.js";
 
 /**
  * RelevanceAgent - Handles communication with Relevance AI API
+ * Translates Relevance responses to A2UI protocol
  */
-class RelevanceAgent {
-  async run(userMessage: string): Promise<v0_8.Types.ServerToClientMessage[]> {
+class rh {
+  async send(t: string): Promise<v0_8.Types.ServerToClientMessage[]> {
     try {
-      const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID;
-      const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY;
-      const agentId = import.meta.env.VITE_AGENT_ID;
+      // 1. Same connection logic
+      const projectId = "a9356a25298d-4f6b-9ccb-e98a9ff058b6";
+      const apiKey = "sk-YTczM2MwZjUtNTM1OC00ZTI1LTg1ODItYjAyNjQxYWU3ZGZj";
+      const agentId = "6635b0a2-03ce-4c80-9e44-4722c0c6752f";
+      
+      const response = await fetch("https://api-bcbe5a.stack.tryrelevance.com/latest/agents/trigger", {
+        method: "POST",
+        headers: {
+          "Authorization": `${projectId}:${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          message: { role: "user", content: t },
+          agent_id: agentId
+        })
+      });
 
-      if (!projectId || !apiKey || !agentId) {
-        throw new Error(
-          "Missing required environment variables: VITE_RELEVANCE_PROJECT_ID, VITE_RELEVANCE_API_KEY, or VITE_AGENT_ID"
-        );
-      }
-
-      const response = await fetch(
-        "https://api-bcbe5a.stack.tryrelevance.com/latest/agents/trigger",
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `${projectId}:${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            message: { role: "user", content: userMessage },
-            agent_id: agentId,
-          }),
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`API Error: ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
 
       const data = await response.json();
-
-      // Step 1: Log raw response for debugging
       console.log("RAW AGENT RESPONSE:", data);
 
-      // Step 2: Extract JSON component from response
-      let componentData = null;
-      let content = "";
-
-      // Hunt for JSON component in various possible locations
-      if (data.output?.component) {
-        componentData = data.output.component;
-        content = JSON.stringify(componentData);
-      } else if (data.component) {
-        componentData = data.component;
-        content = JSON.stringify(componentData);
-      } else if (data.output?.answer) {
-        content = data.output.answer;
-      } else if (data.output?.text) {
-        content = data.output.text;
-      } else if (data.answer) {
-        content = data.answer;
-      } else if (data.text) {
-        content = data.text;
-      } else if (typeof data.output === "string") {
-        content = data.output;
-      } else {
-        content = JSON.stringify(data);
+      let text = data.output?.answer || data.output?.text || data.answer || "No response";
+      
+      // 2. Protocol Translation Logic
+      // Look for <json-component> or use the text as a Text Component
+      let visualData: any = null;
+      const jsonMatch = text.match(/<json-component>([\s\S]*?)<\/json-component>/);
+      if (jsonMatch) {
+        try {
+          visualData = JSON.parse(jsonMatch[1]);
+          console.log("EXTRACTED VISUAL DATA:", visualData);
+        } catch (e) {
+          console.error("Failed to parse json-component:", e);
+        }
+        text = text.replace(/<json-component>[\s\S]*?<\/json-component>/, "").trim();
       }
 
-      console.log("EXTRACTED COMPONENT:", componentData);
-      console.log("EXTRACTED CONTENT:", content);
+      // 3. Construct the A2UI Protocol Envelope
+      const components: any[] = [];
+      
+      // Always add the text response as a Text component
+      components.push({
+        id: "text-id",
+        component: {
+          Text: {
+            text: { literalString: text },
+            usageHint: "body"
+          }
+        }
+      });
 
-      // Step 3: If we have component data, wrap it in A2UI protocol
-      if (componentData && typeof componentData === "object") {
-        console.log("Rendering component via A2UI protocol");
-
-        return [
-          {
-            kind: "beginRendering",
-            surfaceId: "@default",
-            root: "root-id",
-            styles: {},
-            components: [
-              {
-                id: "root-id",
-                component: {
-                  ...componentData,
-                  [componentData.component || "default"]: componentData,
-                },
-              },
-            ],
-          } as v0_8.Types.ServerToClientMessage,
-        ];
+      // If there is a table/graph, add it to the envelope
+      if (visualData) {
+        const type = visualData.component || visualData.ui_type || "Table";
+        const capitalizedType = type.charAt(0).toUpperCase() + type.slice(1);
+        components.push({
+          id: "visual-id",
+          component: {
+            [capitalizedType]: visualData
+          }
+        });
       }
 
-      // Step 4: Fallback to text message if no component
-      console.log("Fallback: returning text message");
-      const messages: v0_8.Types.ServerToClientMessage[] = [];
+      console.log("CONSTRUCTED COMPONENTS:", components);
 
-      if (content) {
-        messages.push({
-          kind: "message",
-          parts: [
+      // 4. Return the "beginRendering" instruction
+      const result: any[] = [{
+        beginRendering: {
+          surfaceId: "@default",
+          root: "root-container",
+          components: [
             {
-              kind: "text",
-              text: content,
+              id: "root-container",
+              component: {
+                Column: {
+                  children: components.map(c => c.id)
+                }
+              }
             },
-          ],
-        } as v0_8.Types.ServerToClientMessage);
-      }
+            ...components
+          ]
+        }
+      }];
 
-      return messages;
+      console.log("RETURNING A2UI PROTOCOL:", result);
+      return result;
+
     } catch (e) {
       console.error("AGENT ERROR:", e);
-      return [
-        {
-          kind: "message",
-          parts: [
+      const errorText = e instanceof Error ? e.message : String(e);
+      
+      return [{
+        beginRendering: {
+          surfaceId: "@default",
+          root: "root-container",
+          components: [
             {
-              kind: "text",
-              text: `Error connecting to Agent: ${e instanceof Error ? e.message : String(e)}`,
+              id: "root-container",
+              component: {
+                Column: {
+                  children: ["error-text-id"]
+                }
+              }
             },
-          ],
-        } as v0_8.Types.ServerToClientMessage,
-      ];
+            {
+              id: "error-text-id",
+              component: {
+                Text: {
+                  text: { literalString: `Error: ${errorText}` },
+                  usageHint: "body"
+                }
+              }
+            }
+          ]
+        }
+      }] as any;
     }
   }
 }
@@ -394,7 +397,7 @@ export class A2UILayoutEditor extends SignalWatcher(LitElement) {
 
   #processor = v0_8.Data.createSignalA2uiMessageProcessor();
   #a2uiClient = new A2UIClient();
-  #relevanceAgent = new RelevanceAgent();
+  #relevanceAgent = new rh();
   #snackbar: Snackbar | undefined = undefined;
   #pendingSnackbarMessages: Array<{
     message: SnackbarMessage;
@@ -537,13 +540,13 @@ export class A2UILayoutEditor extends SignalWatcher(LitElement) {
 
       let response: v0_8.Types.ServerToClientMessage[];
 
-      // Use RelevanceAgent if serverUrl is empty, otherwise use A2UIClient
+      // Use rh (Relevance AI Agent) if serverUrl is empty, otherwise use A2UIClient
       if (this.config.serverUrl === "") {
         if (typeof message === "string") {
-          response = await this.#relevanceAgent.run(message);
+          response = await this.#relevanceAgent.send(message);
         } else if ("userAction" in message) {
           // For user actions, convert to text message
-          response = await this.#relevanceAgent.run(
+          response = await this.#relevanceAgent.send(
             JSON.stringify(message.userAction)
           );
         } else {
