@@ -13,6 +13,32 @@ export interface ToolResponse {
 }
 
 /**
+ * Extracts the final tool output from poll response updates
+ * Prefers: endRendering, output, result, payload, message
+ */
+function extractToolOutput(pollResponse: any): any {
+  if (!pollResponse.updates || !Array.isArray(pollResponse.updates)) {
+    return null;
+  }
+
+  // Iterate through updates in reverse to find the last one with relevant data
+  for (let i = pollResponse.updates.length - 1; i >= 0; i--) {
+    const update = pollResponse.updates[i];
+    if (!update || typeof update !== "object") continue;
+
+    // Check for structured outputs
+    if (update.endRendering) return update.endRendering;
+    if (update.output) return update.output;
+    if (update.result) return update.result;
+    if (update.payload) return update.payload;
+    if (update.message && typeof update.message === "object") return update.message;
+  }
+
+  // Fallback: return raw updates as JSON
+  return pollResponse.updates;
+}
+
+/**
  * Triggers an async tool and polls for completion
  * @param config - Relevance config with stack base, tool ID, project ID, and API key
  * @param params - Parameters to send to the tool (e.g., { message: "hello" } or parsed JSON object)
@@ -37,7 +63,7 @@ export async function triggerAndPollTool(
         "Authorization": authHeader,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ params }),
+      body: JSON.stringify({ params, project: projectId }),
     });
 
     const triggerText = await triggerResponse.text();
@@ -67,11 +93,11 @@ export async function triggerAndPollTool(
 
     console.log(`[Relevance Tool] Job started: ${jobId}`);
 
-    // Step 2: Poll for completion with backoff
-    const pollUrl = `${stackBase}/studios/${toolId}/async_poll/${jobId}?include_updates=true`;
+    // Step 2: Poll for completion with proper stopping logic
+    const pollUrl = `${stackBase}/studios/${toolId}/async_poll/${jobId}?ending_update_only=true`;
     const maxWaitMs = 60000; // 60 seconds
-    const minPollMs = 400; // Min 400ms between polls
-    const maxPollMs = 800; // Max 800ms between polls
+    const minPollMs = 1000; // Min 1s between polls
+    const maxPollMs = 3000; // Max 3s between polls
     const startTime = Date.now();
     let pollCount = 0;
 
@@ -109,30 +135,29 @@ export async function triggerAndPollTool(
 
       console.log("[Relevance Tool] Poll response:", pollData);
 
-      // Check for completion
-      if (pollData.status === "completed" || pollData.status === "done") {
-        const output = pollData.output || "";
-        console.log("[Relevance Tool] Completed with output:", output);
-        return String(output);
+      // CRITICAL FIX: Check for type === "complete" or "failed" (not status)
+      if (pollData.type === "complete") {
+        const extracted = extractToolOutput(pollData);
+        const output = extracted
+          ? typeof extracted === "string"
+            ? extracted
+            : JSON.stringify(extracted)
+          : "Tool completed with no output";
+        console.log("[Relevance Tool] ✓ Complete. Extracted output:", output);
+        return output;
+      }
+
+      if (pollData.type === "failed") {
+        const errorMsg = pollData.error || "Tool execution failed";
+        console.error("[Relevance Tool] ✗ Failed:", errorMsg);
+        throw new Error(errorMsg);
       }
 
       if (pollData.error) {
         throw new Error(`Tool execution failed: ${pollData.error}`);
       }
 
-      // If there are updates, check for a "complete" update
-      if (pollData.updates && Array.isArray(pollData.updates)) {
-        const completeUpdate = pollData.updates
-          .slice()
-          .reverse()
-          .find((update: any) => update.type === "complete");
-        if (completeUpdate && completeUpdate.payload) {
-          console.log("[Relevance Tool] Found complete update:", completeUpdate);
-          return String(completeUpdate.payload);
-        }
-      }
-
-      // Wait before next poll with exponential backoff
+      // Wait before next poll
       const randomDelay = Math.random() * (maxPollMs - minPollMs) + minPollMs;
       await new Promise((resolve) => setTimeout(resolve, randomDelay));
       pollCount++;

@@ -100,15 +100,28 @@ class rh {
       const toolOutput = await triggerAndPollTool(this.#config, params);
       const assistantText = toolOutput || "No response";
 
-      console.log("[RelevanceAgent] Tool output received:", assistantText);
+      console.log("[RelevanceAgent] ✓ Tool output received:", assistantText);
 
-      // Build A2UI response
+      // Parse output if it's JSON
+      let outputContent = assistantText;
+      try {
+        const parsed = JSON.parse(assistantText);
+        outputContent = parsed;
+      } catch {
+        // Not JSON, use as-is
+      }
+
+      // Build A2UI response with smart rendering
       const components: any[] = [
         {
           id: "t1",
           component: {
             Text: {
-              text: { literalString: assistantText },
+              text: { literalString: 
+                typeof outputContent === "string"
+                  ? outputContent
+                  : JSON.stringify(outputContent, null, 2)
+              },
               usageHint: "body",
             },
           },
@@ -135,7 +148,7 @@ class rh {
         },
       ];
 
-      console.log("[RelevanceAgent] Returning A2UI message:", result);
+      console.log("[RelevanceAgent] Rendering response");
       return result;
     } catch (e) {
       const errorText = e instanceof Error ? e.message : String(e);
