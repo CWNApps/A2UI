@@ -88,9 +88,18 @@ class RelevanceAgent {
       // Step 1: Log raw response for debugging
       console.log("RAW AGENT RESPONSE:", data);
 
-      // Step 2: Aggressively hunt for text content
+      // Step 2: Extract JSON component from response
+      let componentData = null;
       let content = "";
-      if (data.output?.answer) {
+
+      // Hunt for JSON component in various possible locations
+      if (data.output?.component) {
+        componentData = data.output.component;
+        content = JSON.stringify(componentData);
+      } else if (data.component) {
+        componentData = data.component;
+        content = JSON.stringify(componentData);
+      } else if (data.output?.answer) {
         content = data.output.answer;
       } else if (data.output?.text) {
         content = data.output.text;
@@ -104,9 +113,34 @@ class RelevanceAgent {
         content = JSON.stringify(data);
       }
 
+      console.log("EXTRACTED COMPONENT:", componentData);
       console.log("EXTRACTED CONTENT:", content);
 
-      // Step 3: Build the response messages in exact format expected
+      // Step 3: If we have component data, wrap it in A2UI protocol
+      if (componentData && typeof componentData === "object") {
+        console.log("Rendering component via A2UI protocol");
+
+        return [
+          {
+            kind: "beginRendering",
+            surfaceId: "@default",
+            root: "root-id",
+            styles: {},
+            components: [
+              {
+                id: "root-id",
+                component: {
+                  ...componentData,
+                  [componentData.component || "default"]: componentData,
+                },
+              },
+            ],
+          } as v0_8.Types.ServerToClientMessage,
+        ];
+      }
+
+      // Step 4: Fallback to text message if no component
+      console.log("Fallback: returning text message");
       const messages: v0_8.Types.ServerToClientMessage[] = [];
 
       if (content) {
