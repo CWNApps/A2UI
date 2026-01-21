@@ -77,7 +77,10 @@ class RelevanceAgent {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            message: message,
+            message: {
+              role: "user",
+              content: message,
+            },
             agent_id: agentId,
           }),
         }
