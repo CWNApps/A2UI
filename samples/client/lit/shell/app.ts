@@ -48,154 +48,56 @@ import { config as restaurantConfig } from "./configs/restaurant.js";
 import { config as contactsConfig } from "./configs/contacts.js";
 import { styleMap } from "lit/directives/style-map.js";
 
-/**
- * Relevance Tools API Client - Interactive trigger with async polling
- * Uses Tools for immediate UI response (not Agents which are async-only)
- */
-class RelevanceToolsClient {
-  #stackBase: string;
-  #projectId: string;
-  #apiKey: string;
-  #toolId: string;
-
-  constructor() {
-    this.#stackBase = import.meta.env.VITE_RELEVANCE_STACK_BASE || "";
-    this.#projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID || "";
-    this.#apiKey = import.meta.env.VITE_RELEVANCE_API_KEY || "";
-    this.#toolId = import.meta.env.VITE_RELEVANCE_TOOL_ID || "";
-  }
-
-  private validateConfig(): string[] {
-    const missing: string[] = [];
-    if (!this.#stackBase) missing.push("VITE_RELEVANCE_STACK_BASE");
-    if (!this.#projectId) missing.push("VITE_RELEVANCE_PROJECT_ID");
-    if (!this.#apiKey) missing.push("VITE_RELEVANCE_API_KEY");
-    if (!this.#toolId) missing.push("VITE_RELEVANCE_TOOL_ID");
-    return missing;
-  }
-
-  async runTool(promptText: string): Promise<string> {
-    const missingVars = this.validateConfig();
-    if (missingVars.length > 0) {
-      const msg = `Missing env vars: ${missingVars.join(", ")}`;
-      console.error(msg);
-      throw new Error(msg);
-    }
-
-    try {
-      // Step 1: Trigger async tool
-      console.log("[Relevance Tool] Triggering async tool...");
-      const triggerUrl = `${this.#stackBase}/studios/${this.#toolId}/trigger_async`;
-      
-      const triggerResponse = await fetch(triggerUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": this.#apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          params: { query: promptText },
-          project: this.#projectId,
-        }),
-      });
-
-      const triggerText = await triggerResponse.text();
-      if (!triggerResponse.ok) {
-        console.error(`[Relevance Tool] Trigger failed: ${triggerResponse.status}`, triggerText);
-        throw new Error(
-          `Tool trigger failed: ${triggerResponse.status} ${triggerText || triggerResponse.statusText}`
-        );
-      }
-
-      let triggerData: any;
-      try {
-        triggerData = triggerText ? JSON.parse(triggerText) : {};
-      } catch (e) {
-        console.error("[Relevance Tool] Failed to parse trigger response:", triggerText);
-        throw new Error(`Invalid trigger response format: ${triggerText}`);
-      }
-
-      const jobId = triggerData.job_id;
-      if (!jobId) {
-        console.error("[Relevance Tool] No job_id in response:", triggerData);
-        throw new Error("No job_id returned from tool trigger");
-      }
-
-      console.log(`[Relevance Tool] Job started: ${jobId}`);
-
-      // Step 2: Poll for completion
-      const pollUrl = `${this.#stackBase}/studios/${this.#toolId}/async_poll/${jobId}?ending_update_only=true`;
-      const maxWaitMs = 60000; // 60 seconds
-      const pollIntervalMs = 500; // Poll every 500ms
-      const startTime = Date.now();
-
-      while (Date.now() - startTime < maxWaitMs) {
-        console.log(`[Relevance Tool] Polling... (${Math.round((Date.now() - startTime) / 1000)}s)`);
-        
-        const pollResponse = await fetch(pollUrl, {
-          method: "GET",
-          headers: {
-            "Authorization": this.#apiKey,
-          },
-        });
-
-        const pollText = await pollResponse.text();
-        if (!pollResponse.ok) {
-          console.error(`[Relevance Tool] Poll failed: ${pollResponse.status}`, pollText);
-          throw new Error(
-            `Poll failed: ${pollResponse.status} ${pollText || pollResponse.statusText}`
-          );
-        }
-
-        let pollData: any;
-        try {
-          pollData = pollText ? JSON.parse(pollText) : {};
-        } catch (e) {
-          console.error("[Relevance Tool] Failed to parse poll response:", pollText);
-          throw new Error(`Invalid poll response format: ${pollText}`);
-        }
-
-        console.log("[Relevance Tool] Poll response:", pollData);
-
-        // Check for completion
-        if (pollData.status === "completed" || pollData.status === "done") {
-          const output = pollData.output || "";
-          console.log("[Relevance Tool] Completed with output:", output);
-          return String(output);
-        }
-
-        if (pollData.error) {
-          throw new Error(`Tool execution failed: ${pollData.error}`);
-        }
-
-        // Wait before next poll
-        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-      }
-
-      throw new Error(`Tool execution timed out after ${maxWaitMs / 1000} seconds`);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error("[Relevance Tool] Error:", msg);
-      throw new Error(msg);
-    }
-  }
-}
+// Import Relevance AI helpers
+import {
+  getRelevanceConfig,
+  validateRelevanceConfig,
+  type RelevanceConfig,
+} from "./src/lib/env";
+import {
+  triggerAndPollTool,
+  parseToolParams,
+} from "./src/lib/relevanceTool";
 
 /**
  * RelevanceAgent - Wrapper for Relevance Tools API
  * Returns A2UI protocol messages
+ * Supports both simple mode ({ message: "..." }) and advanced mode (JSON objects)
  */
 class rh {
-  #toolsClient: RelevanceToolsClient;
+  #config: RelevanceConfig | null = null;
+  #envError: string | null = null;
 
   constructor() {
-    this.#toolsClient = new RelevanceToolsClient();
+    // Check for environment variable errors during init
+    const config = getRelevanceConfig();
+    const missing = validateRelevanceConfig(config);
+    if (missing.length > 0) {
+      this.#envError = `Missing env vars: ${missing.join(", ")}. Set these in your environment and redeploy.`;
+      console.error("[RelevanceAgent]", this.#envError);
+    } else {
+      this.#config = config;
+    }
   }
 
   async send(t: string): Promise<v0_8.Types.ServerToClientMessage[]> {
     try {
-      // Use the Tools API which returns output immediately
-      const toolOutput = await this.#toolsClient.runTool(t);
+      // If env vars are missing, show error
+      if (this.#envError) {
+        return this.#createErrorResponse(this.#envError);
+      }
+
+      if (!this.#config) {
+        return this.#createErrorResponse(
+          "Relevance configuration not available"
+        );
+      }
+
+      // Parse user input (simple or advanced mode)
+      const params = parseToolParams(t);
+      
+      console.log("[RelevanceAgent] Triggering tool with params:", params);
+      const toolOutput = await triggerAndPollTool(this.#config, params);
       const assistantText = toolOutput || "No response";
 
       console.log("[RelevanceAgent] Tool output received:", assistantText);
