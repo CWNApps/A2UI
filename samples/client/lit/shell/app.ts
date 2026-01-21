@@ -52,106 +52,78 @@ import { styleMap } from "lit/directives/style-map.js";
  * RelevanceAgent - Handles communication with Relevance AI API
  */
 class RelevanceAgent {
-  async send(
-    message: string
-  ): Promise<v0_8.Types.ServerToClientMessage[]> {
-    const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID;
-    const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY;
-    const agentId = import.meta.env.VITE_AGENT_ID;
-
-    if (!projectId || !apiKey || !agentId) {
-      throw new Error(
-        "Missing required environment variables: VITE_RELEVANCE_PROJECT_ID, VITE_RELEVANCE_API_KEY, or VITE_AGENT_ID"
-      );
-    }
-
-    const authHeader = `${projectId}:${apiKey}`;
-
+  async run(userMessage: string): Promise<v0_8.Types.ServerToClientMessage[]> {
     try {
+      const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID;
+      const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY;
+      const agentId = import.meta.env.VITE_AGENT_ID;
+
+      if (!projectId || !apiKey || !agentId) {
+        throw new Error(
+          "Missing required environment variables: VITE_RELEVANCE_PROJECT_ID, VITE_RELEVANCE_API_KEY, or VITE_AGENT_ID"
+        );
+      }
+
       const response = await fetch(
         "https://api-bcbe5a.stack.tryrelevance.com/latest/agents/trigger",
         {
           method: "POST",
           headers: {
-            Authorization: authHeader,
+            "Authorization": `${projectId}:${apiKey}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            message: {
-              role: "user",
-              content: message,
-            },
+            message: { role: "user", content: userMessage },
             agent_id: agentId,
           }),
         }
       );
 
       if (!response.ok) {
-        throw new Error(`API returned status ${response.status}`);
+        throw new Error(`API Error: ${response.status}`);
       }
 
       const data = await response.json();
-      console.log("Agent Response:", data);
+      console.log("Agent Data:", data);
 
-      // Extract text from response (try output.answer or output.text)
-      const textResponse = data.output?.answer || data.output?.text || data.answer || "No response text found.";
-      let responseText = textResponse;
-
-      // Check if the response contains a JSON component
-      let jsonComponent = null;
-      if (typeof responseText === "string") {
-        // Look for JSON component markers
-        const jsonMatch = responseText.match(
-          /<json-component>([\s\S]*?)<\/json-component>/
-        );
-        if (jsonMatch) {
-          try {
-            jsonComponent = JSON.parse(jsonMatch[1]);
-            // Remove the JSON component from the text
-            responseText = responseText
-              .replace(/<json-component>[\s\S]*?<\/json-component>/, "")
-              .trim();
-          } catch {
-            // If JSON parsing fails, keep the original text
-          }
-        }
-      }
+      // Robust Extraction
+      const output = data.output || {};
+      const text =
+        output.answer ||
+        output.text ||
+        data.answer ||
+        JSON.stringify(data);
 
       // Build the response messages
       const messages: v0_8.Types.ServerToClientMessage[] = [];
 
-      // Add text message if there's response text
-      if (responseText) {
+      // Add text message
+      if (text) {
         messages.push({
           kind: "message",
           parts: [
             {
               kind: "text",
-              text: responseText,
-            },
-          ],
-        } as v0_8.Types.ServerToClientMessage);
-      }
-
-      // Add JSON component as a separate message if extracted
-      if (jsonComponent) {
-        messages.push({
-          kind: "message",
-          parts: [
-            {
-              kind: "data",
-              data: jsonComponent,
-              mimeType: "application/json+a2aui",
+              text: text,
             },
           ],
         } as v0_8.Types.ServerToClientMessage);
       }
 
       return messages;
-    } catch (error) {
-      throw new Error(
-        `Failed to send message to Relevance AI: ${error instanceof Error ? error.message : String(error)}`
-      );
+    } catch (e) {
+      console.error(e);
+      return [
+        {
+          kind: "message",
+          parts: [
+            {
+              kind: "text",
+              text: "Error connecting to Agent. Check console.",
+            },
+          ],
+        } as v0_8.Types.ServerToClientMessage,
+      ];
     }
   }
 }
@@ -523,10 +495,10 @@ export class A2UILayoutEditor extends SignalWatcher(LitElement) {
       // Use RelevanceAgent if serverUrl is empty, otherwise use A2UIClient
       if (this.config.serverUrl === "") {
         if (typeof message === "string") {
-          response = await this.#relevanceAgent.send(message);
+          response = await this.#relevanceAgent.run(message);
         } else if ("userAction" in message) {
           // For user actions, convert to text message
-          response = await this.#relevanceAgent.send(
+          response = await this.#relevanceAgent.run(
             JSON.stringify(message.userAction)
           );
         } else {
