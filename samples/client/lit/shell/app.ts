@@ -365,36 +365,40 @@ class rh {
       const rawStackBase = import.meta.env.VITE_RELEVANCE_STACK_BASE;
       const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID;
       const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY;
-      const toolId = import.meta.env.VITE_RELEVANCE_TOOL_ID;
+      const agentId = import.meta.env.VITE_RELEVANCE_AGENT_ID;
       const authHeader = `${projectId}:${apiKey}`;
 
       // Validate env vars
-      if (!rawStackBase || !projectId || !apiKey || !toolId) {
+      if (!rawStackBase || !projectId || !apiKey || !agentId) {
         const missing = [
           !rawStackBase && "VITE_RELEVANCE_STACK_BASE",
           !projectId && "VITE_RELEVANCE_PROJECT_ID",
           !apiKey && "VITE_RELEVANCE_API_KEY",
-          !toolId && "VITE_RELEVANCE_TOOL_ID",
+          !agentId && "VITE_RELEVANCE_AGENT_ID",
         ]
           .filter(Boolean)
           .join(", ");
         throw new Error(`Missing env vars: ${missing}`);
       }
 
-      // Normalize base URL: ensure exactly one "/latest" at the end
-      const normalizeRelevanceBase = (raw: string): string => {
-        const clean = raw.replace(/\/+$/, "");
-        return clean.endsWith("/latest") ? clean : `${clean}/latest`;
+      // Normalize base URL: strip trailing / and /latest
+      const normalizeStackBase = (raw: string): string => {
+        return raw.replace(/\/+$/, "").replace(/\/latest$/, "");
       };
-      const stackBase = normalizeRelevanceBase(rawStackBase);
+      const stackBase = normalizeStackBase(rawStackBase);
 
-      // 1. Trigger tool
-      const triggerUrl = `${stackBase}/studios/${toolId}/trigger_async`;
+      // 1. Call NEO agent
+      const triggerUrl = `${stackBase}/latest/agents/trigger`;
       const triggerBody = {
-        tool_id: toolId,
-        params: { message: t },
+        agent_id: agentId,
+        message: {
+          role: "user",
+          content: t,
+        },
       };
-      console.log("[RelevanceAgent] Triggering tool at:", triggerUrl);
+      console.log("[RelevanceAgent] Triggering NEO agent at:", triggerUrl);
+      console.log("[RelevanceAgent] Request body:", triggerBody);
+
       const triggerResp = await fetch(triggerUrl, {
         method: "POST",
         headers: {
@@ -405,131 +409,79 @@ class rh {
       });
 
       if (!triggerResp.ok) {
-        throw new Error(`Trigger failed: ${triggerResp.status} ${triggerResp.statusText}`);
+        throw new Error(`Agent trigger failed: ${triggerResp.status} ${triggerResp.statusText}`);
       }
 
-      const triggerJson = await triggerResp.json();
-      console.log("[RelevanceAgent] Trigger response:", triggerJson);
+      const respData = await triggerResp.json();
+      console.log("[RelevanceAgent] Raw response:", respData);
 
-      const jobId = triggerJson.job_id || triggerJson.id;
-      if (!jobId) {
-        throw new Error("No job_id returned from trigger.");
-      }
-      console.log("[RelevanceAgent] Job ID:", jobId);
-
-      // 2. Poll job until complete
-      let jobComplete = false;
-      let jobRespJson: any = null;
-      const jobUrl = `${stackBase}/studios/${toolId}/async_poll/${jobId}?ending_update_only=true`;
-      const maxWaitMs = 60000; // 60 second timeout
-      const startTime = Date.now();
-
-      while (!jobComplete && Date.now() - startTime < maxWaitMs) {
-        const jobResp = await fetch(jobUrl, {
-          method: "GET",
-          headers: {
-            Authorization: authHeader,
-          },
-        });
-
-        if (!jobResp.ok) {
-          throw new Error(`Poll failed: ${jobResp.status} ${jobResp.statusText}`);
-        }
-
-        jobRespJson = await jobResp.json();
-
-        // Check for completion
-        if (
-          jobRespJson.type === "complete" ||
-          jobRespJson.status === "complete" ||
-          (jobRespJson.completed && (jobRespJson.completed.type === "complete" || jobRespJson.completed.status === "complete"))
-        ) {
-          jobComplete = true;
-          console.log("[RelevanceAgent] Completion detected.");
-        } else {
-          // Wait before next poll
-          await new Promise((res) => setTimeout(res, 1000));
-        }
-      }
-
-      if (!jobComplete) {
-        throw new Error("Job polling timed out after 60 seconds.");
-      }
-
-      // 3. Extract payload
+      // 2. Extract payload in priority order
       let payload: any = undefined;
-      if (jobRespJson.completed?.output?.transformed?.payload) {
-        payload = jobRespJson.completed.output.transformed.payload;
-      } else if (
-        jobRespJson.completed?.updates &&
-        Array.isArray(jobRespJson.completed.updates) &&
-        jobRespJson.completed.updates.length > 0
-      ) {
-        const lastUpdate = jobRespJson.completed.updates[jobRespJson.completed.updates.length - 1];
-        if (lastUpdate?.output?.transformed?.payload) {
-          payload = lastUpdate.output.transformed.payload;
+
+      // Priority 1: data.output.transformed.payload
+      if (respData.data?.output?.transformed?.payload) {
+        payload = respData.data.output.transformed.payload;
+        console.log("[RelevanceAgent] Extracted from data.output.transformed.payload");
+      }
+      // Priority 2: data.output.payload
+      else if (respData.data?.output?.payload) {
+        payload = respData.data.output.payload;
+        console.log("[RelevanceAgent] Extracted from data.output.payload");
+      }
+      // Priority 3: JSON component in answer string
+      else if (respData.data?.output?.answer) {
+        const answerStr = respData.data.output.answer;
+        const jsonMatch = answerStr.match(/<json-component>([\s\S]*?)<\/json-component>/);
+        if (jsonMatch) {
+          try {
+            payload = JSON.parse(jsonMatch[1]);
+            console.log("[RelevanceAgent] Extracted from <json-component> tag");
+          } catch (e) {
+            console.warn("[RelevanceAgent] Failed to parse json-component:", e);
+          }
         }
       }
-
-      if (!payload) {
-        payload = jobRespJson.completed || jobRespJson;
+      // Priority 4: fallback to answer as text
+      if (!payload && respData.data?.output?.answer) {
+        payload = respData.data.output.answer;
+        console.log("[RelevanceAgent] Using answer as fallback text");
       }
 
       console.log("[RelevanceAgent] Extracted payload:", payload);
 
-      // 4. Build A2UI components
+      // 3. Translate payload to A2UI components
       const components: any[] = [];
       let componentId = 0;
       const genId = (prefix: string) => `${prefix}_${++componentId}`;
 
-      // Title
-      const titleText =
-        payload?.title || payload?.dashboard_title || "Dashboard";
-      const titleId = genId("title");
-      components.push({
-        id: titleId,
-        component: {
-          Text: {
-            text: { literalString: titleText },
-            usageHint: "heading",
-          },
-        },
-      });
-
-      // Body
-      let bodyId: string;
-      if (
-        !payload ||
-        !payload.data ||
-        !Array.isArray(payload.data.rows) ||
-        payload.data.rows.length === 0
-      ) {
-        // No rows: show "No rows returned" message
-        bodyId = genId("body_text");
-        let text = "No rows returned";
-        if (payload?.message) {
-          text += `: ${payload.message}`;
-        }
-        components.push({
-          id: bodyId,
-          component: {
-            Text: {
-              text: { literalString: text },
-              usageHint: "body",
-            },
-          },
-        });
-      } else {
-        // Has rows: create Cards for each row
+      // Helper function to translate table payload to A2UI List+Cards
+      const translateTable = (tablePayload: any): string[] => {
         const cardIds: string[] = [];
-        payload.data.rows.forEach((row: any, rowIdx: number) => {
-          const cardId = genId(`card_${rowIdx}`);
-          const colId = genId(`col_${rowIdx}`);
+        const rows = tablePayload?.data?.rows || [];
+
+        if (rows.length === 0) {
+          const emptyId = genId("empty_msg");
+          components.push({
+            id: emptyId,
+            component: {
+              Text: {
+                text: { literalString: "No rows returned." },
+                usageHint: "body",
+              },
+            },
+          });
+          return [emptyId];
+        }
+
+        // Create a Card for each row
+        rows.forEach((row: any, rowIdx: number) => {
+          const cardId = genId(`table_card_${rowIdx}`);
+          const colId = genId(`table_col_${rowIdx}`);
 
           // Create Text components for each key-value pair
           const textIds: string[] = [];
           Object.entries(row).forEach(([key, value], textIdx: number) => {
-            const textId = genId(`text_${rowIdx}_${textIdx}`);
+            const textId = genId(`table_text_${rowIdx}_${textIdx}`);
             textIds.push(textId);
             components.push({
               id: textId,
@@ -565,32 +517,122 @@ class rh {
           cardIds.push(cardId);
         });
 
-        // Create body as Column of Cards
-        bodyId = genId("body");
+        return cardIds;
+      };
+
+      // Helper to translate mixed payload
+      const translateMixed = (mixedPayload: any): string[] => {
+        const sectionIds: string[] = [];
+        const sections = mixedPayload?.data?.components || [];
+
+        sections.forEach((section: any, idx: number) => {
+          // Add section title
+          if (section.title) {
+            const titleId = genId(`mixed_title_${idx}`);
+            components.push({
+              id: titleId,
+              component: {
+                Text: {
+                  text: { literalString: section.title },
+                  usageHint: "heading",
+                },
+              },
+            });
+            sectionIds.push(titleId);
+          }
+
+          // Add divider
+          const dividerId = genId(`divider_${idx}`);
+          components.push({
+            id: dividerId,
+            component: {
+              Divider: {},
+            },
+          });
+          sectionIds.push(dividerId);
+
+          // Translate content based on type
+          if (section.component === "table" && section.data?.rows) {
+            const tableIds = translateTable(section);
+            sectionIds.push(...tableIds);
+          } else if (section.data) {
+            const contentId = genId(`mixed_content_${idx}`);
+            components.push({
+              id: contentId,
+              component: {
+                Text: {
+                  text: { literalString: JSON.stringify(section.data, null, 2) },
+                  usageHint: "code",
+                },
+              },
+            });
+            sectionIds.push(contentId);
+          }
+        });
+
+        return sectionIds;
+      };
+
+      // Translate payload based on component type
+      let visualContentIds: string[] = [];
+
+      if (typeof payload === "string") {
+        // Payload is plain text
+        const textId = genId("text_response");
         components.push({
-          id: bodyId,
+          id: textId,
           component: {
-            Column: {
-              children: cardIds,
+            Text: {
+              text: { literalString: payload },
+              usageHint: "body",
             },
           },
         });
+        visualContentIds = [textId];
+      } else if (payload?.component === "table") {
+        visualContentIds = translateTable(payload);
+      } else if (payload?.component === "mixed") {
+        visualContentIds = translateMixed(payload);
+      } else if (payload) {
+        // Unknown component type: render as JSON
+        const jsonId = genId("json_payload");
+        components.push({
+          id: jsonId,
+          component: {
+            Text: {
+              text: { literalString: JSON.stringify(payload, null, 2) },
+              usageHint: "code",
+            },
+          },
+        });
+        visualContentIds = [jsonId];
       }
 
-      // Root Column
+      // Create visual root container
+      const visualRootId = genId("visual_root");
+      components.push({
+        id: visualRootId,
+        component: {
+          Column: {
+            children: visualContentIds,
+          },
+        },
+      });
+
+      // Create root: Column with text response and visual content
       const rootId = "root";
       components.push({
         id: rootId,
         component: {
           Column: {
-            children: [titleId, bodyId],
+            children: [visualRootId],
           },
         },
       });
 
       console.log("[RelevanceAgent] Component count:", components.length);
 
-      // 5. Return A2UI protocol messages
+      // 4. Return A2UI protocol messages
       return [
         {
           surfaceUpdate: {
