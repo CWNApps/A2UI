@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 /*
  Copyright 2025 Google LLC
 
