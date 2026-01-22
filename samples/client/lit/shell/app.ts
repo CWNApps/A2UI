@@ -48,17 +48,20 @@ import { config as restaurantConfig } from "./configs/restaurant.js";
 import { config as contactsConfig } from "./configs/contacts.js";
 import { styleMap } from "lit/directives/style-map.js";
 
-// Import Relevance AI helpers
+// Import Relevance AI config and utilities
 import {
   getRelevanceConfig,
   validateRelevanceConfig,
-  normalizeStackBase,
+  buildApiBase,
+  buildEndpointUrls,
+  createAuthHeader,
   type RelevanceConfig,
-} from "./src/lib/env";
+} from "./src/lib/relevanceConfig";
 import {
-  triggerAndPollTool,
-  parseToolParams,
-} from "./src/lib/relevanceTool";
+  extractUiPayload,
+  getComponentType,
+  getRowCount,
+} from "./src/lib/extractUiPayload";
 
 /**
  * Converts a Relevance payload to proper A2UI ServerToClient messages.
@@ -364,66 +367,50 @@ class rh {
 
   async send(t: string): Promise<v0_8.Types.ServerToClientMessage[]> {
     try {
-      // Step 1: Read all env vars with backward compatibility
-      const rawStackBase = 
-        import.meta.env.VITE_RELEVANCE_STACK_BASE || "";
-      const agentId =
-        import.meta.env.VITE_RELEVANCE_AGENT_ID ?? 
-        import.meta.env.VITE_AGENT_ID ?? 
-        "";
-      const toolId =
-        import.meta.env.VITE_RELEVANCE_TOOL_ID ?? 
-        import.meta.env.VITE_TOOL_ID ?? 
-        "";
-      const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID || "";
-      const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY || "";
+      // === STEP 1: Load and validate config ===
+      const config = getRelevanceConfig();
+      const missing = validateRelevanceConfig(config);
 
-      // Step 2: Normalize stack base to avoid /latest/latest
-      const stackBase = normalizeStackBase(rawStackBase);
-      console.log("[RelevanceRouter] Normalized base URL:", stackBase);
-
-      // Step 3: Build endpoint URLs
-      // Note: stackBase now includes /latest already, so use /studios/... not /latest/studios/...
-      const triggerToolUrl = new URL("/studios/" + toolId + "/trigger_async", stackBase).toString();
-      const triggerAgentUrl = new URL("/agents/trigger", stackBase).toString();
-      console.log("[RelevanceRouter] Agent endpoint:", triggerAgentUrl);
-      console.log("[RelevanceRouter] Tool endpoint:", triggerToolUrl);
-
-      // Step 4: Validate we have either agent or tool
-      if (!rawStackBase || !projectId || !apiKey) {
-        const missing = [
-          !rawStackBase && "VITE_RELEVANCE_STACK_BASE",
-          !projectId && "VITE_RELEVANCE_PROJECT_ID",
-          !apiKey && "VITE_RELEVANCE_API_KEY",
-        ]
-          .filter(Boolean)
-          .join(", ");
-        throw new Error(`Missing env vars: ${missing}`);
-      }
-
-      if (!agentId && !toolId) {
+      if (missing.length > 0) {
+        const missingList = missing.join(", ");
         throw new Error(
-          "Missing env vars: either VITE_RELEVANCE_AGENT_ID/VITE_AGENT_ID or VITE_RELEVANCE_TOOL_ID/VITE_TOOL_ID required"
+          `Missing required environment variables: ${missingList}\n` +
+          `Please ensure all variables are set in your .env file and Vercel environment.`
         );
       }
 
-      const authHeader = `Basic ${btoa(`${projectId}:${apiKey}`)}`;
+      // === STEP 2: Build endpoints ===
+      const endpoints = buildEndpointUrls(config);
+      const apiBase = endpoints.apiBase;
+      
+      console.log(`[RelevanceRouter] API Base: ${apiBase}`);
+      console.log(`[RelevanceRouter] Agent URL: ${endpoints.agentTrigger}`);
+      console.log(`[RelevanceRouter] Tool URL: ${endpoints.toolTrigger}`);
+
+      // === STEP 3: Create auth header ===
+      const authHeader = createAuthHeader(config.projectId, config.apiKey);
+
+      // === STEP 4: Prepare message object ===
+      // Handle both string input and object input for message
+      const messageBody = typeof t === "string" ? { text: t } : t;
+
       let payload: any = undefined;
       let routeUsed = "UNKNOWN";
       let pollStopReason = "unknown";
 
-      // Step 5: Route: Prefer AGENT if available, fall back to TOOL
-      if (agentId) {
-        console.log("[RelevanceRouter] Using AGENT endpoint");
+      // === STEP 5: Route - Prefer AGENT if available ===
+      if (config.agentId) {
         routeUsed = "AGENT";
+        console.log("[RelevanceRouter] Using AGENT endpoint");
 
         const triggerBody = {
-          agent_id: agentId,
+          agent_id: config.agentId,
           conversation_id: this.#getConversationId(),
-          message: { role: "user", content: t },
+          message: messageBody,
         };
 
-        const triggerResp = await fetch(triggerAgentUrl, {
+        console.log("[RelevanceRouter] Sending agent request...");
+        const triggerResp = await fetch(endpoints.agentTrigger, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -435,34 +422,34 @@ class rh {
         console.log(`[RelevanceRouter] Agent response: ${triggerResp.status}`);
 
         if (!triggerResp.ok) {
+          const errText = await triggerResp.text();
           throw new Error(
-            `Agent trigger failed: ${triggerResp.status} ${triggerResp.statusText}`
+            `Agent request failed (${triggerResp.status}): ${errText}`
           );
         }
 
         const respData = await triggerResp.json();
-        console.log("[RelevanceRouter] Agent response data:", respData);
+        console.log("[RelevanceRouter] Agent response received");
 
-        // Extract payload from agent response
-        if (respData.data?.output?.transformed?.payload) {
-          payload = respData.data.output.transformed.payload;
-        } else if (respData.data?.output?.payload) {
-          payload = respData.data.output.payload;
-        } else if (respData.data?.output?.answer) {
-          payload = respData.data.output.answer;
-        } else {
-          payload = respData;
+        // Use robust extraction
+        const extracted = extractUiPayload(respData);
+        payload = extracted.payload;
+        if (extracted.message) {
+          console.log(`[RelevanceRouter] Agent message: ${extracted.message}`);
         }
-      } else if (toolId) {
-        console.log("[RelevanceRouter] Using TOOL endpoint");
+      } 
+      // === STEP 6: Fallback to TOOL if AGENT not configured ===
+      else if (config.toolId) {
         routeUsed = "TOOL";
+        console.log("[RelevanceRouter] Using TOOL endpoint");
 
         const triggerBody = {
-          tool_id: toolId,
+          tool_id: config.toolId,
           params: { message: t },
         };
 
-        const triggerResp = await fetch(triggerToolUrl, {
+        console.log("[RelevanceRouter] Sending tool trigger request...");
+        const triggerResp = await fetch(endpoints.toolTrigger, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -474,8 +461,9 @@ class rh {
         console.log(`[RelevanceRouter] Tool trigger: ${triggerResp.status}`);
 
         if (!triggerResp.ok) {
+          const errText = await triggerResp.text();
           throw new Error(
-            `Tool trigger failed: ${triggerResp.status} ${triggerResp.statusText}`
+            `Tool trigger failed (${triggerResp.status}): ${errText}`
           );
         }
 
@@ -483,21 +471,23 @@ class rh {
         const jobId = triggerData.job_id;
 
         if (!jobId) {
-          throw new Error("No job_id returned from tool trigger");
+          throw new Error(
+            "Tool trigger succeeded but returned no job_id. Response: " +
+            JSON.stringify(triggerData)
+          );
         }
 
-        // Poll for completion
-        const maxWaitMs = 60000;
-        const minPollMs = 1000;
-        const maxPollMs = 3000;
+        console.log(`[RelevanceRouter] Job ID: ${jobId}. Starting poll...`);
+
+        // === STEP 7: Poll with EXPONENTIAL BACKOFF (up to 180s) ===
+        const maxWaitMs = 180000; // 180 seconds
         const startTime = Date.now();
         let pollCount = 0;
+        let pollDelayMs = 1000; // Start at 1 second
+        const maxPollDelayMs = 8000; // Cap at 8 seconds
 
         while (Date.now() - startTime < maxWaitMs) {
-          const pollUrl = new URL(
-            `/studios/${toolId}/async_poll/${jobId}?ending_update_only=true`,
-            stackBase
-          ).toString();
+          const pollUrl = endpoints.toolPoll(jobId);
 
           const pollResp = await fetch(pollUrl, {
             method: "GET",
@@ -506,100 +496,98 @@ class rh {
 
           if (!pollResp.ok) {
             throw new Error(
-              `Poll failed: ${pollResp.status} ${pollResp.statusText}`
+              `Poll failed (${pollResp.status}): ${pollResp.statusText}`
             );
           }
 
           const pollData = await pollResp.json();
+          pollCount++;
 
+          console.log(
+            `[RelevanceRouter] Poll #${pollCount}: type=${pollData.type}`
+          );
+
+          // === SUCCESS: type === "complete" ===
           if (pollData.type === "complete") {
-            // Extract from updates - safely handle null/undefined
-            if (pollData.updates && Array.isArray(pollData.updates)) {
-              for (let i = pollData.updates.length - 1; i >= 0; i--) {
-                const update = pollData.updates[i];
-                if (update && typeof update === "object") {
-                  if (update.payload) {
-                    payload = update.payload;
-                    break;
-                  } else if (update.output) {
-                    payload = update.output;
-                    break;
-                  }
-                }
-              }
-            }
             pollStopReason = "complete";
-            console.log("[RelevanceRouter] Tool completed (poll attempt #" + pollCount + ")");
-            break;
+            console.log(
+              `[RelevanceRouter] Tool completed after ${pollCount} polls (${Date.now() - startTime}ms)`
+            );
+
+            // Extract payload from updates
+            const extracted = extractUiPayload(pollData);
+            payload = extracted.payload;
+
+            if (extracted.message) {
+              console.log(
+                `[RelevanceRouter] Tool message: ${extracted.message}`
+              );
+            }
+
+            break; // Exit loop immediately
           }
 
+          // === ERROR: Something went wrong ===
           if (pollData.type === "error" || pollData.error) {
             pollStopReason = "error";
-            throw new Error(pollData.error || "Tool execution error");
+            throw new Error(
+              `Tool execution error: ${pollData.error || pollData.type}`
+            );
           }
 
-          const randomDelay =
-            Math.random() * (maxPollMs - minPollMs) + minPollMs;
-          await new Promise((resolve) => setTimeout(resolve, randomDelay));
-          pollCount++;
+          // === WAITING: Still processing, show status if available ===
+          if (pollData.type === "waiting-for-capacity") {
+            console.log(
+              `[RelevanceRouter] Waiting for capacity... (poll #${pollCount})`
+            );
+            // Continue polling with current delay
+          }
+
+          // === BACKOFF: Calculate next delay (exponential, capped) ===
+          const nextDelay = Math.min(pollDelayMs * 2, maxPollDelayMs);
+          console.log(
+            `[RelevanceRouter] Next poll in ${pollDelayMs}ms (exponential backoff)`
+          );
+
+          await new Promise((resolve) => setTimeout(resolve, pollDelayMs));
+          pollDelayMs = nextDelay;
         }
 
+        // === TIMEOUT: Exceeded max wait time ===
         if (!payload) {
           pollStopReason = "timeout";
-          throw new Error("Tool execution timed out or returned no payload");
+          throw new Error(
+            `Tool polling timed out after ${Date.now() - startTime}ms ` +
+            `(${pollCount} attempts). Max wait is ${maxWaitMs}ms.`
+          );
         }
+      } 
+      // === NO ENDPOINT CONFIGURED ===
+      else {
+        throw new Error(
+          "Neither AGENT nor TOOL endpoint configured. " +
+          "Set VITE_RELEVANCE_AGENT_ID or VITE_RELEVANCE_TOOL_ID."
+        );
       }
 
-      // Step 6: Convert payload to A2UI messages
-      // Log what we're rendering for debugging
-      let componentType = "unknown";
-      let rowCount = 0;
-      if (typeof payload === "string") {
-        componentType = "text";
-      } else if (payload?.component === "table" || (payload?.data?.rows && Array.isArray(payload.data.rows))) {
-        componentType = "table";
-        rowCount = payload?.data?.rows?.length || 0;
-      } else if (payload?.component === "metric") {
-        componentType = "metric";
-      } else if (payload?.component === "chart") {
-        componentType = "chart";
-      } else if (payload?.component === "graph") {
-        componentType = "graph";
-      } else if (payload && typeof payload === "object") {
-        componentType = "json";
-      }
+      // === STEP 8: Render payload ===
+      const componentType = getComponentType(payload);
+      const rowCount = getRowCount(payload);
 
       const messages = toA2uiMessagesFromRelevance(payload, "Result");
-      console.log(`[RelevanceRouter] Route: ${routeUsed}, Stop: ${pollStopReason}, Type: ${componentType}(${rowCount}), Messages: ${messages.length}`);
+
+      console.log(
+        `[RelevanceRouter] ✅ Success: route=${routeUsed}, stop=${pollStopReason}, ` +
+        `type=${componentType}, rows=${rowCount}, messages=${messages.length}`
+      );
 
       return messages;
     } catch (err: any) {
-      console.error("[RelevanceRouter] Error:", err?.message || String(err));
       const errorMsg = err?.message || String(err);
-      return [
-        {
-          surfaceUpdate: {
-            surfaceId: "@default",
-            components: [
-              {
-                id: "error",
-                component: {
-                  Text: {
-                    text: { literalString: `Error: ${errorMsg}` },
-                    usageHint: "body",
-                  },
-                },
-              },
-            ],
-          } as any,
-        },
-        {
-          beginRendering: {
-            surfaceId: "@default",
-            root: "error",
-          } as any,
-        },
-      ];
+      console.error(`[RelevanceRouter] ❌ Error: ${errorMsg}`);
+
+      // Always return a visible error message
+      return this.#createErrorResponse(errorMsg);
     }
   }
 

@@ -1,0 +1,17 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "devCommand": "npm run dev",
+  "env": {
+    "VITE_RELEVANCE_STACK_BASE": "@VITE_RELEVANCE_STACK_BASE",
+    "VITE_RELEVANCE_AGENT_ID": "@VITE_RELEVANCE_AGENT_ID",
+    "VITE_RELEVANCE_TOOL_ID": "@VITE_RELEVANCE_TOOL_ID",
+    "VITE_RELEVANCE_PROJECT_ID": "@VITE_RELEVANCE_PROJECT_ID",
+    "VITE_RELEVANCE_API_KEY": "@VITE_RELEVANCE_API_KEY",
+    "VITE_RELEVANCE_CONVERSATION_ID": "@VITE_RELEVANCE_CONVERSATION_ID"
+  },
+  "routes": [
+    { "handle": "filesystem" },
+    { "src": "/(.*)", "dest": "/index.html" }
+  ]
+}
