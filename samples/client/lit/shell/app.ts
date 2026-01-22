@@ -52,6 +52,7 @@ import { styleMap } from "lit/directives/style-map.js";
 import {
   getRelevanceConfig,
   validateRelevanceConfig,
+  normalizeStackBase,
   type RelevanceConfig,
 } from "./src/lib/env";
 import {
@@ -361,294 +362,193 @@ class rh {
 
   async send(t: string): Promise<v0_8.Types.ServerToClientMessage[]> {
     try {
-      // Read env vars
-      const rawStackBase = import.meta.env.VITE_RELEVANCE_STACK_BASE;
-      const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID;
-      const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY;
-      const agentId = import.meta.env.VITE_RELEVANCE_AGENT_ID;
-      const authHeader = `${projectId}:${apiKey}`;
+      // Step 1: Read all env vars with backward compatibility
+      const rawStackBase = 
+        import.meta.env.VITE_RELEVANCE_STACK_BASE || "";
+      const agentId =
+        import.meta.env.VITE_RELEVANCE_AGENT_ID ?? 
+        import.meta.env.VITE_AGENT_ID ?? 
+        "";
+      const toolId =
+        import.meta.env.VITE_RELEVANCE_TOOL_ID ?? 
+        import.meta.env.VITE_TOOL_ID ?? 
+        "";
+      const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID || "";
+      const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY || "";
 
-      // Validate env vars
-      if (!rawStackBase || !projectId || !apiKey || !agentId) {
+      // Step 2: Normalize stack base to avoid /latest/latest
+      const stackBase = normalizeStackBase(rawStackBase);
+      console.log("[RelevanceRouter] Normalized base URL:", stackBase);
+
+      // Step 3: Build endpoint URLs
+      const triggerToolUrl = new URL("/latest/studios/tools/trigger_async", stackBase).toString();
+      const pollToolUrl = new URL("/latest/studios/tools/poll_async", stackBase).toString();
+      const triggerAgentUrl = new URL("/latest/agents/trigger", stackBase).toString();
+      console.log("[RelevanceRouter] Agent endpoint:", triggerAgentUrl);
+      console.log("[RelevanceRouter] Tool endpoint:", triggerToolUrl);
+
+      // Step 4: Validate we have either agent or tool
+      if (!rawStackBase || !projectId || !apiKey) {
         const missing = [
           !rawStackBase && "VITE_RELEVANCE_STACK_BASE",
           !projectId && "VITE_RELEVANCE_PROJECT_ID",
           !apiKey && "VITE_RELEVANCE_API_KEY",
-          !agentId && "VITE_RELEVANCE_AGENT_ID",
         ]
           .filter(Boolean)
           .join(", ");
         throw new Error(`Missing env vars: ${missing}`);
       }
 
-      // Normalize base URL: strip trailing / and /latest
-      const normalizeStackBase = (raw: string): string => {
-        return raw.replace(/\/+$/, "").replace(/\/latest$/, "");
-      };
-      const stackBase = normalizeStackBase(rawStackBase);
-
-      // 1. Call NEO agent
-      const triggerUrl = `${stackBase}/latest/agents/trigger`;
-      const triggerBody = {
-        agent_id: agentId,
-        message: {
-          role: "user",
-          content: t,
-        },
-      };
-      console.log("[RelevanceAgent] Triggering NEO agent at:", triggerUrl);
-      console.log("[RelevanceAgent] Request body:", triggerBody);
-
-      const triggerResp = await fetch(triggerUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: authHeader,
-        },
-        body: JSON.stringify(triggerBody),
-      });
-
-      if (!triggerResp.ok) {
-        throw new Error(`Agent trigger failed: ${triggerResp.status} ${triggerResp.statusText}`);
+      if (!agentId && !toolId) {
+        throw new Error(
+          "Missing env vars: either VITE_RELEVANCE_AGENT_ID/VITE_AGENT_ID or VITE_RELEVANCE_TOOL_ID/VITE_TOOL_ID required"
+        );
       }
 
-      const respData = await triggerResp.json();
-      console.log("[RelevanceAgent] Raw response:", respData);
-
-      // 2. Extract payload in priority order
+      const authHeader = `${projectId}:${apiKey}`;
       let payload: any = undefined;
+      let routeUsed = "UNKNOWN";
 
-      // Priority 1: data.output.transformed.payload
-      if (respData.data?.output?.transformed?.payload) {
-        payload = respData.data.output.transformed.payload;
-        console.log("[RelevanceAgent] Extracted from data.output.transformed.payload");
-      }
-      // Priority 2: data.output.payload
-      else if (respData.data?.output?.payload) {
-        payload = respData.data.output.payload;
-        console.log("[RelevanceAgent] Extracted from data.output.payload");
-      }
-      // Priority 3: JSON component in answer string
-      else if (respData.data?.output?.answer) {
-        const answerStr = respData.data.output.answer;
-        const jsonMatch = answerStr.match(/<json-component>([\s\S]*?)<\/json-component>/);
-        if (jsonMatch) {
-          try {
-            payload = JSON.parse(jsonMatch[1]);
-            console.log("[RelevanceAgent] Extracted from <json-component> tag");
-          } catch (e) {
-            console.warn("[RelevanceAgent] Failed to parse json-component:", e);
-          }
-        }
-      }
-      // Priority 4: fallback to answer as text
-      if (!payload && respData.data?.output?.answer) {
-        payload = respData.data.output.answer;
-        console.log("[RelevanceAgent] Using answer as fallback text");
-      }
+      // Step 5: Route: Prefer AGENT if available, fall back to TOOL
+      if (agentId) {
+        console.log("[RelevanceRouter] Using AGENT endpoint");
+        routeUsed = "AGENT";
 
-      console.log("[RelevanceAgent] Extracted payload:", payload);
+        const triggerBody = {
+          agent_id: agentId,
+          conversation_id: this.#getConversationId(),
+          message: { text: t },
+        };
 
-      // 3. Translate payload to A2UI components
-      const components: any[] = [];
-      let componentId = 0;
-      const genId = (prefix: string) => `${prefix}_${++componentId}`;
+        const triggerResp = await fetch(triggerAgentUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: authHeader,
+          },
+          body: JSON.stringify(triggerBody),
+        });
 
-      // Helper function to translate table payload to A2UI List+Cards
-      const translateTable = (tablePayload: any): string[] => {
-        const cardIds: string[] = [];
-        const rows = tablePayload?.data?.rows || [];
+        console.log(`[RelevanceRouter] Agent response: ${triggerResp.status}`);
 
-        if (rows.length === 0) {
-          const emptyId = genId("empty_msg");
-          components.push({
-            id: emptyId,
-            component: {
-              Text: {
-                text: { literalString: "No rows returned." },
-                usageHint: "body",
-              },
-            },
-          });
-          return [emptyId];
+        if (!triggerResp.ok) {
+          throw new Error(
+            `Agent trigger failed: ${triggerResp.status} ${triggerResp.statusText}`
+          );
         }
 
-        // Create a Card for each row
-        rows.forEach((row: any, rowIdx: number) => {
-          const cardId = genId(`table_card_${rowIdx}`);
-          const colId = genId(`table_col_${rowIdx}`);
+        const respData = await triggerResp.json();
+        console.log("[RelevanceRouter] Agent response data:", respData);
 
-          // Create Text components for each key-value pair
-          const textIds: string[] = [];
-          Object.entries(row).forEach(([key, value], textIdx: number) => {
-            const textId = genId(`table_text_${rowIdx}_${textIdx}`);
-            textIds.push(textId);
-            components.push({
-              id: textId,
-              component: {
-                Text: {
-                  text: { literalString: `${key}: ${value}` },
-                  usageHint: "body",
-                },
-              },
-            });
-          });
+        // Extract payload from agent response
+        if (respData.data?.output?.transformed?.payload) {
+          payload = respData.data.output.transformed.payload;
+        } else if (respData.data?.output?.payload) {
+          payload = respData.data.output.payload;
+        } else if (respData.data?.output?.answer) {
+          payload = respData.data.output.answer;
+        } else {
+          payload = respData;
+        }
+      } else if (toolId) {
+        console.log("[RelevanceRouter] Using TOOL endpoint");
+        routeUsed = "TOOL";
 
-          // Create Column for text items
-          components.push({
-            id: colId,
-            component: {
-              Column: {
-                children: textIds,
-              },
-            },
-          });
+        const triggerBody = {
+          tool_id: toolId,
+          params: { message: t },
+        };
 
-          // Create Card wrapping the Column
-          components.push({
-            id: cardId,
-            component: {
-              Card: {
-                children: [colId],
-              },
-            },
-          });
-
-          cardIds.push(cardId);
+        const triggerResp = await fetch(triggerToolUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: authHeader,
+          },
+          body: JSON.stringify(triggerBody),
         });
 
-        return cardIds;
-      };
+        console.log(`[RelevanceRouter] Tool trigger: ${triggerResp.status}`);
 
-      // Helper to translate mixed payload
-      const translateMixed = (mixedPayload: any): string[] => {
-        const sectionIds: string[] = [];
-        const sections = mixedPayload?.data?.components || [];
+        if (!triggerResp.ok) {
+          throw new Error(
+            `Tool trigger failed: ${triggerResp.status} ${triggerResp.statusText}`
+          );
+        }
 
-        sections.forEach((section: any, idx: number) => {
-          // Add section title
-          if (section.title) {
-            const titleId = genId(`mixed_title_${idx}`);
-            components.push({
-              id: titleId,
-              component: {
-                Text: {
-                  text: { literalString: section.title },
-                  usageHint: "heading",
-                },
-              },
-            });
-            sectionIds.push(titleId);
+        const triggerData = await triggerResp.json();
+        const jobId = triggerData.job_id;
+
+        if (!jobId) {
+          throw new Error("No job_id returned from tool trigger");
+        }
+
+        // Poll for completion
+        const maxWaitMs = 60000;
+        const minPollMs = 1000;
+        const maxPollMs = 3000;
+        const startTime = Date.now();
+        let pollCount = 0;
+
+        while (Date.now() - startTime < maxWaitMs) {
+          const pollUrl = new URL(
+            `/latest/studios/tools/poll_async/${jobId}?ending_update_only=true`,
+            stackBase
+          ).toString();
+
+          const pollResp = await fetch(pollUrl, {
+            method: "GET",
+            headers: { Authorization: authHeader },
+          });
+
+          if (!pollResp.ok) {
+            throw new Error(
+              `Poll failed: ${pollResp.status} ${pollResp.statusText}`
+            );
           }
 
-          // Add divider
-          const dividerId = genId(`divider_${idx}`);
-          components.push({
-            id: dividerId,
-            component: {
-              Divider: {},
-            },
-          });
-          sectionIds.push(dividerId);
+          const pollData = await pollResp.json();
 
-          // Translate content based on type
-          if (section.component === "table" && section.data?.rows) {
-            const tableIds = translateTable(section);
-            sectionIds.push(...tableIds);
-          } else if (section.data) {
-            const contentId = genId(`mixed_content_${idx}`);
-            components.push({
-              id: contentId,
-              component: {
-                Text: {
-                  text: { literalString: JSON.stringify(section.data, null, 2) },
-                  usageHint: "code",
-                },
-              },
-            });
-            sectionIds.push(contentId);
+          if (pollData.type === "complete") {
+            // Extract from updates
+            if (pollData.updates && Array.isArray(pollData.updates)) {
+              for (let i = pollData.updates.length - 1; i >= 0; i--) {
+                const update = pollData.updates[i];
+                if (update?.payload) {
+                  payload = update.payload;
+                  break;
+                } else if (update?.output) {
+                  payload = update.output;
+                  break;
+                }
+              }
+            }
+            console.log("[RelevanceRouter] Tool completed");
+            break;
           }
-        });
 
-        return sectionIds;
-      };
+          if (pollData.type === "error" || pollData.error) {
+            throw new Error(pollData.error || "Tool execution error");
+          }
 
-      // Translate payload based on component type
-      let visualContentIds: string[] = [];
+          const randomDelay =
+            Math.random() * (maxPollMs - minPollMs) + minPollMs;
+          await new Promise((resolve) => setTimeout(resolve, randomDelay));
+          pollCount++;
+        }
 
-      if (typeof payload === "string") {
-        // Payload is plain text
-        const textId = genId("text_response");
-        components.push({
-          id: textId,
-          component: {
-            Text: {
-              text: { literalString: payload },
-              usageHint: "body",
-            },
-          },
-        });
-        visualContentIds = [textId];
-      } else if (payload?.component === "table") {
-        visualContentIds = translateTable(payload);
-      } else if (payload?.component === "mixed") {
-        visualContentIds = translateMixed(payload);
-      } else if (payload) {
-        // Unknown component type: render as JSON
-        const jsonId = genId("json_payload");
-        components.push({
-          id: jsonId,
-          component: {
-            Text: {
-              text: { literalString: JSON.stringify(payload, null, 2) },
-              usageHint: "code",
-            },
-          },
-        });
-        visualContentIds = [jsonId];
+        if (!payload) {
+          throw new Error("Tool execution timed out or returned no payload");
+        }
       }
 
-      // Create visual root container
-      const visualRootId = genId("visual_root");
-      components.push({
-        id: visualRootId,
-        component: {
-          Column: {
-            children: visualContentIds,
-          },
-        },
-      });
+      // Step 6: Convert payload to A2UI messages
+      const messages = toA2uiMessagesFromRelevance(payload, "Result");
+      console.log(`[RelevanceRouter] Route: ${routeUsed}, Messages: ${messages.length}`);
 
-      // Create root: Column with text response and visual content
-      const rootId = "root";
-      components.push({
-        id: rootId,
-        component: {
-          Column: {
-            children: [visualRootId],
-          },
-        },
-      });
-
-      console.log("[RelevanceAgent] Component count:", components.length);
-
-      // 4. Return A2UI protocol messages
-      return [
-        {
-          surfaceUpdate: {
-            surfaceId: "@default",
-            components: components,
-          },
-        },
-        {
-          beginRendering: {
-            surfaceId: "@default",
-            root: "root",
-          },
-        },
-      ] as any;
+      return messages;
     } catch (err: any) {
-      console.error("[RelevanceAgent] Error in send:", err);
+      console.error("[RelevanceRouter] Error:", err?.message || String(err));
       const errorMsg = err?.message || String(err);
       return [
         {
@@ -665,16 +565,26 @@ class rh {
                 },
               },
             ],
-          },
+          } as any,
         },
         {
           beginRendering: {
             surfaceId: "@default",
             root: "error",
-          },
+          } as any,
         },
-      ] as any;
+      ];
     }
+  }
+
+  #getConversationId(): string {
+    const storageKey = "relevance_conversation_id";
+    let id = localStorage.getItem(storageKey);
+    if (!id) {
+      id = `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      localStorage.setItem(storageKey, id);
+    }
+    return id;
   }
 
   #createErrorResponse(message: string): v0_8.Types.ServerToClientMessage[] {

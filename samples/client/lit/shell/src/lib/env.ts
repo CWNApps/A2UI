@@ -1,36 +1,69 @@
 /**
  * Environment configuration helper for Relevance AI integration
- * Reads and validates environment variables needed for Tool API
+ * Supports backward compatibility with both VITE_AGENT_ID and VITE_RELEVANCE_AGENT_ID naming
  */
 
 export interface RelevanceConfig {
   stackBase: string;
+  agentId: string;
   toolId: string;
   projectId: string;
   apiKey: string;
 }
 
 /**
- * Reads environment variables for Relevance AI Tools API
- * @returns RelevanceConfig with all values, or throws error if validation fails
+ * Normalizes stack base URL by removing trailing slashes and /latest suffix
+ * This prevents /latest/latest in the final URLs
  */
-export function getRelevanceConfig(): RelevanceConfig {
-  const stackBase = import.meta.env.VITE_RELEVANCE_STACK_BASE || "";
-  const toolId = import.meta.env.VITE_RELEVANCE_TOOL_ID || "";
-  const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID || "";
-  const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY || "";
-
-  return { stackBase, toolId, projectId, apiKey };
+export function normalizeStackBase(url: string): string {
+  // Remove trailing slashes
+  let normalized = url.replace(/\/+$/, "");
+  // Remove /latest suffix if present
+  normalized = normalized.replace(/\/latest$/, "");
+  return normalized;
 }
 
 /**
- * Validates that all required environment variables are present
- * @returns Array of missing variable names, empty if all present
+ * Reads environment variables for Relevance AI with backward compatibility
+ * Supports both naming schemes:
+ *   - VITE_RELEVANCE_AGENT_ID (preferred)
+ *   - VITE_AGENT_ID (fallback)
+ * Similarly for tool ID
+ */
+export function getRelevanceConfig(): RelevanceConfig {
+  const stackBase = import.meta.env.VITE_RELEVANCE_STACK_BASE || "";
+  const agentId =
+    import.meta.env.VITE_RELEVANCE_AGENT_ID ?? import.meta.env.VITE_AGENT_ID ?? "";
+  const toolId =
+    import.meta.env.VITE_RELEVANCE_TOOL_ID ?? import.meta.env.VITE_TOOL_ID ?? "";
+  const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID || "";
+  const apiKey = import.meta.env.VITE_RELEVANCE_API_KEY || "";
+
+  return { stackBase, agentId, toolId, projectId, apiKey };
+}
+
+/**
+ * Validates that required environment variables are present
+ * Returns array of missing variable names (empty if valid)
+ * Accepts either naming scheme for agent/tool IDs
  */
 export function validateRelevanceConfig(config: RelevanceConfig): string[] {
   const missing: string[] = [];
   if (!config.stackBase) missing.push("VITE_RELEVANCE_STACK_BASE");
-  if (!config.toolId) missing.push("VITE_RELEVANCE_TOOL_ID");
+  // Agent ID: need at least one naming scheme present
+  if (!config.agentId) {
+    const agentIdEnvName = import.meta.env.VITE_RELEVANCE_AGENT_ID
+      ? "VITE_RELEVANCE_AGENT_ID"
+      : "VITE_AGENT_ID";
+    missing.push(agentIdEnvName);
+  }
+  // Tool ID: need at least one naming scheme present (optional if agentId present)
+  if (!config.toolId && !config.agentId) {
+    const toolIdEnvName = import.meta.env.VITE_RELEVANCE_TOOL_ID
+      ? "VITE_RELEVANCE_TOOL_ID"
+      : "VITE_TOOL_ID";
+    missing.push(toolIdEnvName);
+  }
   if (!config.projectId) missing.push("VITE_RELEVANCE_PROJECT_ID");
   if (!config.apiKey) missing.push("VITE_RELEVANCE_API_KEY");
   return missing;
@@ -38,8 +71,7 @@ export function validateRelevanceConfig(config: RelevanceConfig): string[] {
 
 /**
  * Gets config and validates it
- * @returns RelevanceConfig if valid
- * @throws Error if any required vars are missing
+ * Requires: stackBase, projectId, apiKey, and either agentId OR toolId
  */
 export function getValidatedRelevanceConfig(): RelevanceConfig {
   const config = getRelevanceConfig();
