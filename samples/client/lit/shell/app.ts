@@ -391,8 +391,11 @@ class rh {
       const authHeader = createAuthHeader(config.projectId, config.apiKey);
 
       // === STEP 4: Prepare message object ===
-      // Handle both string input and object input for message
-      const messageBody = typeof t === "string" ? { text: t } : t;
+      // Relevance trigger requires message.role + message.content
+      const messageBody = {
+        role: "user",
+        content: typeof t === "string" ? t : JSON.stringify(t),
+      };
 
       let payload: any = undefined;
       let routeUsed = "UNKNOWN";
@@ -405,7 +408,6 @@ class rh {
 
         const triggerBody = {
           agent_id: config.agentId,
-          conversation_id: this.#getConversationId(),
           message: messageBody,
         };
 
