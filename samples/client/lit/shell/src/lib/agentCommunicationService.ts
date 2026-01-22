@@ -206,28 +206,34 @@ export class AgentCommunicationService {
       throw new AgentError("Missing required credentials (agentId or apiKey)");
     }
 
-    // Build agent request payload (correct format - no "role" property)
-    const payload = buildAgentRequestPayload(agentId, conversationId, query, {
-      userId: this.configManager.get("userId"),
-    });
+    // Build agent request payload for /trigger endpoint (requires "role" property)
+    const payload = buildAgentRequestPayload(
+      agentId,
+      conversationId,
+      query,
+      {
+        userId: this.configManager.get("userId"),
+      },
+      "trigger" // Use trigger endpoint which requires "role" property
+    );
 
     // Validate payload (throws if invalid)
     try {
-      validateAgentRequestPayload(payload);
+      validateAgentRequestPayload(payload, "trigger");
     } catch (error) {
       throw new AgentError(
         `Invalid agent request payload: ${error instanceof Error ? error.message : String(error)}`
       );
     }
 
-    // Build endpoint URL
-    const agentVersion = this.configManager.get("agentVersion");
-    const endpoint = `${apiBaseUrl}/latest/agents/${agentId}/run`;
+    // Build endpoint URL for /trigger endpoint
+    const endpoint = `${apiBaseUrl}/agents/trigger`;
 
     this.errorHandler.debug("Executing agent request", {
       endpoint,
       agentId,
       query: query.substring(0, 100),
+      payload: JSON.stringify(payload).substring(0, 200),
     });
 
     try {
