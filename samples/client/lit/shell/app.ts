@@ -356,16 +356,17 @@ class rh {
   // Polls /jobs/{job_id} with exponential backoff until completion
   private async pollJobStatus(
     apiBase: string,
+    studioId: string,
     jobId: string,
     authHeader: string,
-    maxRetries = 12,
+    maxRetries = 10,
     initialDelayMs = 1000,
     maxDelayMs = 30000
   ): Promise<any> {
     let delayMs = initialDelayMs;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const jobUrl = `${apiBase}/jobs/${jobId}`;
+      const jobUrl = `${apiBase}/studios/${studioId}/jobs/${jobId}`;
       const res = await fetch(jobUrl, {
         headers: { Authorization: authHeader },
       });
@@ -424,205 +425,73 @@ class rh {
       const apiBase = endpoints.apiBase;
       
       console.log(`[RelevanceRouter] API Base: ${apiBase}`);
-      console.log(`[RelevanceRouter] Agent URL: ${endpoints.agentTrigger}`);
-      console.log(`[RelevanceRouter] Tool URL: ${endpoints.toolTrigger}`);
+      console.log(`[RelevanceRouter] Studio Trigger URL: ${endpoints.studioTrigger}`);
+      console.log(`[RelevanceRouter] Studio Job URL: ${endpoints.studioJobStatus("<job_id>")}`);
 
       // === STEP 3: Create auth header ===
       const authHeader = createAuthHeader(config.projectId, config.apiKey);
 
-      // === STEP 4: Prepare message object ===
-      // Relevance trigger requires message.role + message.content
-      const messageBody = {
-        role: "user",
-        content: typeof t === "string" ? t : JSON.stringify(t),
-      };
+      const conversationId = config.conversationId || this.#getConversationId();
 
       let payload: any = undefined;
-      let routeUsed = "UNKNOWN";
+      let routeUsed = "STUDIO_ASYNC";
       let pollStopReason = "unknown";
 
-      // === STEP 5: Route - Prefer AGENT if available ===
-      if (config.agentId) {
-        routeUsed = "AGENT";
-        console.log("[RelevanceRouter] Using AGENT endpoint");
-
-        const triggerBody = {
+      const triggerBody = {
+        role: "data_engine",
+        input: typeof t === "string" ? t.trim() : JSON.stringify(t),
+        context: {
+          job_id: undefined,
+          studio_id: config.studioId,
+          conversation_id: conversationId,
           agent_id: config.agentId,
-          message: messageBody,
-        };
+        },
+        parameters: {
+          visualization_type: "table",
+          limit: 10,
+        },
+      };
 
-        console.log("[RelevanceRouter] Sending agent request...");
-        const triggerResp = await fetch(endpoints.agentTrigger, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: authHeader,
-          },
-          body: JSON.stringify(triggerBody),
-        });
+      console.log("[RelevanceRouter] Sending studio async trigger...");
+      const triggerResp = await fetch(endpoints.studioTrigger, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeader,
+        },
+        body: JSON.stringify(triggerBody),
+      });
 
-        console.log(`[RelevanceRouter] Agent response: ${triggerResp.status}`);
+      console.log(`[RelevanceRouter] Studio trigger response: ${triggerResp.status}`);
 
-        if (!triggerResp.ok) {
-          const errText = await triggerResp.text();
-          throw new Error(
-            `Agent request failed (${triggerResp.status}): ${errText}`
-          );
-        }
-
-        const respData = await triggerResp.json();
-        console.log("[RelevanceRouter] Agent response received");
-        const jobInfo = (respData as any).job_info || (respData as any).jobInfo || (respData as any).job;
-
-        // If server returns async job info, poll until completion
-        if (jobInfo?.job_id) {
-          const jobId = jobInfo.job_id;
-          console.log(`[RelevanceRouter] Agent job queued: ${jobId} (state=${jobInfo.state})`);
-          const jobResult = await this.pollJobStatus(apiBase, jobId, authHeader);
-          const extracted = extractUiPayload(jobResult);
-          payload = extracted.payload ?? jobResult;
-          if (extracted.message) {
-            console.log(`[RelevanceRouter] Agent message: ${extracted.message}`);
-          }
-        } else {
-          // Synchronous response path
-          const extracted = extractUiPayload(respData);
-          payload = extracted.payload;
-          if (extracted.message) {
-            console.log(`[RelevanceRouter] Agent message: ${extracted.message}`);
-          }
-        }
-      } 
-      // === STEP 6: Fallback to TOOL if AGENT not configured ===
-      else if (config.toolId) {
-        routeUsed = "TOOL";
-        console.log("[RelevanceRouter] Using TOOL endpoint");
-
-        const triggerBody = {
-          tool_id: config.toolId,
-          params: { message: t },
-        };
-
-        console.log("[RelevanceRouter] Sending tool trigger request...");
-        const triggerResp = await fetch(endpoints.toolTrigger, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: authHeader,
-          },
-          body: JSON.stringify(triggerBody),
-        });
-
-        console.log(`[RelevanceRouter] Tool trigger: ${triggerResp.status}`);
-
-        if (!triggerResp.ok) {
-          const errText = await triggerResp.text();
-          throw new Error(
-            `Tool trigger failed (${triggerResp.status}): ${errText}`
-          );
-        }
-
-        const triggerData = await triggerResp.json();
-        const jobId = triggerData.job_id;
-
-        if (!jobId) {
-          throw new Error(
-            "Tool trigger succeeded but returned no job_id. Response: " +
-            JSON.stringify(triggerData)
-          );
-        }
-
-        console.log(`[RelevanceRouter] Job ID: ${jobId}. Starting poll...`);
-
-        // === STEP 7: Poll with EXPONENTIAL BACKOFF (up to 180s) ===
-        const maxWaitMs = 180000; // 180 seconds
-        const startTime = Date.now();
-        let pollCount = 0;
-        let pollDelayMs = 1000; // Start at 1 second
-        const maxPollDelayMs = 8000; // Cap at 8 seconds
-
-        while (Date.now() - startTime < maxWaitMs) {
-          const pollUrl = endpoints.toolPoll(jobId);
-
-          const pollResp = await fetch(pollUrl, {
-            method: "GET",
-            headers: { Authorization: authHeader },
-          });
-
-          if (!pollResp.ok) {
-            throw new Error(
-              `Poll failed (${pollResp.status}): ${pollResp.statusText}`
-            );
-          }
-
-          const pollData = await pollResp.json();
-          pollCount++;
-
-          console.log(
-            `[RelevanceRouter] Poll #${pollCount}: type=${pollData.type}`
-          );
-
-          // === SUCCESS: type === "complete" ===
-          if (pollData.type === "complete") {
-            pollStopReason = "complete";
-            console.log(
-              `[RelevanceRouter] Tool completed after ${pollCount} polls (${Date.now() - startTime}ms)`
-            );
-
-            // Extract payload from updates
-            const extracted = extractUiPayload(pollData);
-            payload = extracted.payload;
-
-            if (extracted.message) {
-              console.log(
-                `[RelevanceRouter] Tool message: ${extracted.message}`
-              );
-            }
-
-            break; // Exit loop immediately
-          }
-
-          // === ERROR: Something went wrong ===
-          if (pollData.type === "error" || pollData.error) {
-            pollStopReason = "error";
-            throw new Error(
-              `Tool execution error: ${pollData.error || pollData.type}`
-            );
-          }
-
-          // === WAITING: Still processing, show status if available ===
-          if (pollData.type === "waiting-for-capacity") {
-            console.log(
-              `[RelevanceRouter] Waiting for capacity... (poll #${pollCount})`
-            );
-            // Continue polling with current delay
-          }
-
-          // === BACKOFF: Calculate next delay (exponential, capped) ===
-          const nextDelay = Math.min(pollDelayMs * 2, maxPollDelayMs);
-          console.log(
-            `[RelevanceRouter] Next poll in ${pollDelayMs}ms (exponential backoff)`
-          );
-
-          await new Promise((resolve) => setTimeout(resolve, pollDelayMs));
-          pollDelayMs = nextDelay;
-        }
-
-        // === TIMEOUT: Exceeded max wait time ===
-        if (!payload) {
-          pollStopReason = "timeout";
-          throw new Error(
-            `Tool polling timed out after ${Date.now() - startTime}ms ` +
-            `(${pollCount} attempts). Max wait is ${maxWaitMs}ms.`
-          );
-        }
-      } 
-      // === NO ENDPOINT CONFIGURED ===
-      else {
+      if (!triggerResp.ok) {
+        const errText = await triggerResp.text();
         throw new Error(
-          "Neither AGENT nor TOOL endpoint configured. " +
-          "Set VITE_RELEVANCE_AGENT_ID or VITE_RELEVANCE_TOOL_ID."
+          `Studio trigger failed (${triggerResp.status}): ${errText}`
         );
+      }
+
+      const triggerData = await triggerResp.json();
+      const jobInfo = triggerData?.job_info || triggerData?.jobInfo || triggerData?.job;
+      const jobId = jobInfo?.job_id || triggerData?.job_id || triggerData?.jobId;
+
+      if (jobId) {
+        console.log(`[RelevanceRouter] Studio job queued: ${jobId} (state=${jobInfo?.state || "unknown"})`);
+        const jobResult = await this.pollJobStatus(apiBase, config.studioId, jobId, authHeader, 10, 1000, 30000);
+        const extracted = extractUiPayload(jobResult);
+        payload = extracted.payload ?? jobResult;
+        pollStopReason = "job-complete";
+        if (extracted.message) {
+          console.log(`[RelevanceRouter] Job message: ${extracted.message}`);
+        }
+      } else {
+        // Synchronous (rare) path
+        const extracted = extractUiPayload(triggerData);
+        payload = extracted.payload ?? triggerData;
+        pollStopReason = "sync-response";
+        if (extracted.message) {
+          console.log(`[RelevanceRouter] Trigger message: ${extracted.message}`);
+        }
       }
 
       // === STEP 8: Render payload ===

@@ -35,6 +35,19 @@ export interface TriggerEndpointPayload {
   };
 }
 
+// Studio async trigger payload format (/studios/{id}/trigger_async)
+export interface StudioTriggerPayload {
+  role: string;
+  input: string;
+  context: {
+    job_id?: string;
+    studio_id: string;
+    conversation_id: string;
+    agent_id: string;
+  };
+  parameters?: Record<string, unknown>;
+}
+
 // Run endpoint payload format (without role)
 export interface RunEndpointPayload {
   agent_id: string;
@@ -44,7 +57,10 @@ export interface RunEndpointPayload {
   };
 }
 
-export type AgentRequestPayload = TriggerEndpointPayload | RunEndpointPayload;
+export type AgentRequestPayload =
+  | TriggerEndpointPayload
+  | RunEndpointPayload
+  | StudioTriggerPayload;
 
 export interface AgentResponsePayload {
   data: {
@@ -134,6 +150,37 @@ export function getTriggerEndpointSchema(): JsonSchema {
 }
 
 /**
+ * Get JSON Schema for studio async trigger endpoint
+ */
+export function getStudioTriggerSchema(): JsonSchema {
+  return {
+    type: "object",
+    required: ["role", "input", "context"],
+    properties: {
+      role: { type: "string", default: "data_engine" },
+      input: { type: "string" },
+      context: {
+        type: "object",
+        required: ["studio_id", "conversation_id", "agent_id"],
+        properties: {
+          job_id: { type: "string" },
+          studio_id: { type: "string" },
+          conversation_id: { type: "string" },
+          agent_id: { type: "string" },
+        },
+      },
+      parameters: {
+        type: "object",
+        properties: {
+          visualization_type: { type: "string", default: "table" },
+          limit: { type: "number", default: 10 },
+        },
+      },
+    },
+  };
+}
+
+/**
  * Get JSON Schema for /run endpoint (no "role" property)
  */
 export function getRunEndpointSchema(): JsonSchema {
@@ -170,7 +217,9 @@ export function buildAgentRequestPayload(
   conversationId: string,
   input: string,
   context?: Partial<AgentRequestContext>,
-  endpoint: "run" | "trigger" = "run"
+  endpoint: "run" | "trigger" | "studio" = "run",
+  studioId?: string,
+  parameters?: Record<string, unknown>
 ): AgentRequestPayload {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("agentId is required and must be a string");
@@ -182,6 +231,30 @@ export function buildAgentRequestPayload(
 
   if (!input || typeof input !== "string") {
     throw new Error("input must be a non-empty string");
+  }
+
+  // Build payload for studio async trigger endpoint
+  if (endpoint === "studio") {
+    if (!studioId) {
+      throw new Error("studioId is required for studio trigger payloads");
+    }
+
+    const payload: StudioTriggerPayload = {
+      role: (context?.metadata?.role as string) || "data_engine",
+      input: input.trim(),
+      context: {
+        job_id: (context?.metadata?.job_id as string) || undefined,
+        studio_id: studioId,
+        conversation_id: conversationId,
+        agent_id: agentId,
+      },
+      parameters: parameters || {
+        visualization_type: "table",
+        limit: 10,
+      },
+    };
+
+    return recursiveValidatePayload(payload, getStudioTriggerSchema());
   }
 
   // Build payload for /trigger endpoint (requires message.role + message.content)
@@ -217,10 +290,32 @@ export function buildAgentRequestPayload(
  */
 export function validateAgentRequestPayload(
   payload: any,
-  endpoint: "run" | "trigger" = "run"
+  endpoint: "run" | "trigger" | "studio" = "run"
 ): payload is AgentRequestPayload {
   if (!payload || typeof payload !== "object") {
     throw new Error("Payload must be an object");
+  }
+
+  if (endpoint === "studio") {
+    if (!payload.role || typeof payload.role !== "string") {
+      throw new Error('Missing required property "role": {missingProperty:"role"}');
+    }
+    if (!payload.input || typeof payload.input !== "string") {
+      throw new Error('Missing required property "input": {missingProperty:"input"}');
+    }
+    if (!payload.context || typeof payload.context !== "object") {
+      throw new Error('Missing required property "context": {missingProperty:"context"}');
+    }
+    if (!payload.context.studio_id || typeof payload.context.studio_id !== "string") {
+      throw new Error('Missing required property "context.studio_id": {missingProperty:"context.studio_id"}');
+    }
+    if (!payload.context.conversation_id || typeof payload.context.conversation_id !== "string") {
+      throw new Error('Missing required property "context.conversation_id": {missingProperty:"context.conversation_id"}');
+    }
+    if (!payload.context.agent_id || typeof payload.context.agent_id !== "string") {
+      throw new Error('Missing required property "context.agent_id": {missingProperty:"context.agent_id"}');
+    }
+    return true;
   }
 
   if (endpoint === "trigger") {

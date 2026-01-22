@@ -9,9 +9,11 @@ cp .env.example .env
 # Step 2: Edit .env with your Relevance AI credentials
 # (Get these from your Relevance AI project settings)
 # 
+# VITE_RELEVANCE_STACK_BASE=https://api-bcbe5a.stack.tryrelevance.com/latest
 # VITE_RELEVANCE_PROJECT_ID=your_project_id
 # VITE_RELEVANCE_API_KEY=your_api_key
-# VITE_RELEVANCE_AGENT_ID=your_agent_id
+# VITE_RELEVANCE_STUDIO_ID=agent_empty_chain_inline
+# VITE_RELEVANCE_AGENT_ID=6635b0a2-03ce-4c80-9e44-4722c0c6752f
 
 # Step 3: Install and run
 npm install
@@ -24,10 +26,11 @@ The app detects Relevance AI mode when `config.serverUrl` is empty (default).
 
 When you send a message:
 1. ✅ Credentials are read from `.env`
-2. ✅ API call is made to Relevance AI
-3. ✅ Response is converted to A2UI protocol
-4. ✅ **Text is always rendered** (never blank)
-5. ✅ **JSON components are extracted and rendered if present**
+2. ✅ POST to `/studios/{studioId}/trigger_async` with `role: "data_engine"`
+3. ✅ Poll `/studios/{studioId}/jobs/{job_id}` with exponential backoff (1s → 30s, max 10)
+4. ✅ Response is converted to A2UI protocol
+5. ✅ **Text is always rendered** (never blank)
+6. ✅ **JSON components are extracted and rendered if present**
 
 ## 3. What Gets Rendered
 

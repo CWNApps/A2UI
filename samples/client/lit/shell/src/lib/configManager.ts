@@ -9,6 +9,7 @@ export interface Config {
   apiKey: string;
   projectId: string;
   agentId: string;
+  studioId: string;
   
   // Agent Configuration
   agentVersion: string;
@@ -46,6 +47,7 @@ export const DEFAULT_CONFIG: Config = {
   apiKey: "",
   projectId: "",
   agentId: "",
+  studioId: "",
   
   agentVersion: "latest",
   conversationId: "",
@@ -100,6 +102,8 @@ export class ConfigManager {
     if (getEnv("API_KEY")) this.config.apiKey = getEnv("API_KEY")!;
     if (getEnv("PROJECT_ID")) this.config.projectId = getEnv("PROJECT_ID")!;
     if (getEnv("AGENT_ID")) this.config.agentId = getEnv("AGENT_ID")!;
+    if (getEnv("RELEVANCE_STUDIO_ID")) this.config.studioId = getEnv("RELEVANCE_STUDIO_ID")!;
+    else if (getEnv("STUDIO_ID")) this.config.studioId = getEnv("STUDIO_ID")!;
 
     // Agent Configuration
     if (getEnv("AGENT_VERSION")) this.config.agentVersion = getEnv("AGENT_VERSION")!;
@@ -172,6 +176,7 @@ export class ConfigManager {
     if (!this.config.apiKey) errors.push("apiKey is required (set VITE_API_KEY)");
     if (!this.config.projectId) errors.push("projectId is required (set VITE_PROJECT_ID)");
     if (!this.config.agentId) errors.push("agentId is required (set VITE_AGENT_ID)");
+    if (!this.config.studioId) errors.push("studioId is required (set VITE_RELEVANCE_STUDIO_ID or VITE_STUDIO_ID)");
 
     if (this.config.maxQueryDepth < 1) errors.push("maxQueryDepth must be at least 1");
     if (this.config.maxQueueSize < 1) errors.push("maxQueueSize must be at least 1");
@@ -226,6 +231,7 @@ export class ConfigManager {
       apiKey: this.config.apiKey,
       projectId: this.config.projectId,
       agentId: this.config.agentId,
+      studioId: this.config.studioId,
       agentVersion: this.config.agentVersion,
       timeout: this.config.queryTimeoutMs,
     };

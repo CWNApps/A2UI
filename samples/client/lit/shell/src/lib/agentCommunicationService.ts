@@ -200,15 +200,16 @@ export class AgentCommunicationService {
    */
   private async executeAgentRequest(query: string, conversationId: string): Promise<AgentResponse> {
     const agentId = this.configManager.get("agentId");
+    const studioId = this.configManager.get("studioId") || this.configManager.get("agentId");
     const apiKey = this.configManager.get("apiKey");
     const apiBaseUrl = this.configManager.get("apiBaseUrl");
     const projectId = this.configManager.get("projectId");
 
-    if (!agentId || !apiKey || !projectId) {
-      throw new AgentError("Missing required credentials (agentId, projectId or apiKey)");
+    if (!agentId || !apiKey || !projectId || !studioId) {
+      throw new AgentError("Missing required credentials (agentId, studioId, projectId or apiKey)");
     }
 
-    // Build agent request payload for /trigger endpoint (requires message.role + message.content)
+    // Build agent request payload for studio async trigger endpoint
     const payload = buildAgentRequestPayload(
       agentId,
       conversationId,
@@ -216,20 +217,25 @@ export class AgentCommunicationService {
       {
         userId: this.configManager.get("userId"),
       },
-      "trigger"
+      "studio",
+      studioId,
+      {
+        visualization_type: "table",
+        limit: 10,
+      }
     );
 
     // Validate payload (throws if invalid)
     try {
-      validateAgentRequestPayload(payload, "trigger");
+      validateAgentRequestPayload(payload, "studio");
     } catch (error) {
       throw new AgentError(
         `Invalid agent request payload: ${error instanceof Error ? error.message : String(error)}`
       );
     }
 
-    // Build endpoint URL for /trigger endpoint
-    const endpoint = `${apiBaseUrl}/agents/trigger`;
+    // Build endpoint URL for studio async trigger
+    const endpoint = `${apiBaseUrl}/studios/${studioId}/trigger_async`;
 
     this.errorHandler.debug("Executing agent request", {
       endpoint,
@@ -249,11 +255,11 @@ export class AgentCommunicationService {
         signal: AbortSignal.timeout(this.configManager.get("queryTimeoutMs")),
       });
 
-      const data = await response.json();
+      const triggerData = await response.json();
       const requestId = response.headers.get("x-request-id") || undefined;
 
-      // Validate response
-      const validation = validateHttpResponse(response.status, data, endpoint);
+      // Validate trigger response
+      const validation = validateHttpResponse(response.status, triggerData, endpoint);
       if (!validation.valid) {
         const agentError = new AgentError(validation.error, response.status, {
           requestId,
@@ -264,16 +270,36 @@ export class AgentCommunicationService {
       }
 
       if (!response.ok) {
-        throw new AgentError(`HTTP ${response.status}: ${data?.message || "Unknown error"}`, response.status, {
+        throw new AgentError(`HTTP ${response.status}: ${triggerData?.message || "Unknown error"}`, response.status, {
           requestId,
           endpoint,
           retryable: response.status >= 500,
         });
       }
 
+      // Expect job_info.job_id for async execution
+      const jobId =
+        triggerData?.job_info?.job_id ||
+        triggerData?.jobInfo?.job_id ||
+        triggerData?.job_id ||
+        triggerData?.jobId;
+
+      if (!jobId) {
+        // If no job id is returned, treat the trigger response as final
+        return {
+          status: response.status,
+          data: triggerData,
+          timestamp: Date.now(),
+          requestId,
+        };
+      }
+
+      // Poll job status with exponential backoff until completion
+      const jobResult = await this.pollJobStatus(apiBaseUrl, studioId, jobId, createAuthHeader(projectId, apiKey));
+
       return {
-        status: response.status,
-        data,
+        status: 200,
+        data: jobResult,
         timestamp: Date.now(),
         requestId,
       };
@@ -289,6 +315,64 @@ export class AgentCommunicationService {
       }
       throw new AgentError(`Request failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  private async pollJobStatus(
+    apiBaseUrl: string,
+    studioId: string,
+    jobId: string,
+    authHeader: string,
+    maxRetries = 10,
+    initialDelayMs = 1000,
+    maxDelayMs = 30000
+  ): Promise<any> {
+    let delayMs = initialDelayMs;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const url = `${apiBaseUrl}/studios/${studioId}/jobs/${jobId}`;
+      const res = await fetch(url, {
+        headers: { Authorization: authHeader },
+      });
+
+      const bodyText = await res.text();
+      let jobStatus: any;
+      try {
+        jobStatus = bodyText ? JSON.parse(bodyText) : {};
+      } catch (err) {
+        throw new AgentError(`Failed to parse job status response: ${bodyText}`, res.status, {
+          url,
+          attempt,
+        });
+      }
+
+      const state = jobStatus?.state || jobStatus?.status;
+      this.errorHandler.debug("Job poll", { attempt, state, jobId });
+
+      if (!res.ok) {
+        throw new AgentError(`Job poll failed (${res.status}): ${bodyText || res.statusText}`, res.status, {
+          url,
+          attempt,
+          retryable: res.status >= 500 || res.status === 429,
+        });
+      }
+
+      if (state === "success" || state === "completed" || state === "complete") {
+        return jobStatus;
+      }
+
+      if (state === "failure" || state === "failed" || state === "error") {
+        const errMsg = jobStatus?.error || jobStatus?.message || "Job failed";
+        throw new AgentError(errMsg, res.status, { url, attempt });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, maxDelayMs);
+    }
+
+    throw new AgentError("Job polling reached max retries without completion", 504, {
+      jobId,
+      studioId,
+    });
   }
 
   /**

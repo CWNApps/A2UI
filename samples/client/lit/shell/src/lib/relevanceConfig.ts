@@ -12,6 +12,7 @@
 export interface RelevanceConfig {
   stackBase: string;
   agentId: string;
+  studioId: string;
   toolId: string;
   projectId: string;
   apiKey: string;
@@ -56,19 +57,29 @@ export function buildApiBase(stackBase: string): string {
  */
 export function getRelevanceConfig(): RelevanceConfig {
   // Stack base (required)
-  const stackBase = import.meta.env.VITE_RELEVANCE_STACK_BASE || "";
+  const stackBase =
+    import.meta.env.VITE_RELEVANCE_STACK_BASE ||
+    "https://api-bcbe5a.stack.tryrelevance.com/latest";
+
+  // Studio ID (async trigger target)
+  const studioId =
+    import.meta.env.VITE_RELEVANCE_STUDIO_ID ??
+    import.meta.env.VITE_STUDIO_ID ??
+    import.meta.env.VITE_RELEVANCE_TOOL_ID ??
+    import.meta.env.VITE_TOOL_ID ??
+    "agent_empty_chain_inline";
 
   // Agent ID (backward compatible: VITE_RELEVANCE_AGENT_ID -> VITE_AGENT_ID)
   const agentId =
     import.meta.env.VITE_RELEVANCE_AGENT_ID ?? 
     import.meta.env.VITE_AGENT_ID ?? 
-    "";
+    "6635b0a2-03ce-4c80-9e44-4722c0c6752f";
 
   // Tool ID (backward compatible: VITE_RELEVANCE_TOOL_ID -> VITE_TOOL_ID)
   const toolId =
     import.meta.env.VITE_RELEVANCE_TOOL_ID ?? 
     import.meta.env.VITE_TOOL_ID ?? 
-    "";
+    studioId;
 
   // Auth (required)
   const projectId = import.meta.env.VITE_RELEVANCE_PROJECT_ID || "";
@@ -83,6 +94,7 @@ export function getRelevanceConfig(): RelevanceConfig {
   return {
     stackBase,
     agentId,
+    studioId,
     toolId,
     projectId,
     apiKey,
@@ -113,8 +125,11 @@ export function validateRelevanceConfig(config: RelevanceConfig): string[] {
   if (!config.apiKey) {
     missing.push("VITE_RELEVANCE_API_KEY");
   }
-  if (!config.agentId && !config.toolId) {
-    missing.push("VITE_RELEVANCE_AGENT_ID/VITE_AGENT_ID OR VITE_RELEVANCE_TOOL_ID/VITE_TOOL_ID");
+  if (!config.agentId) {
+    missing.push("VITE_RELEVANCE_AGENT_ID/VITE_AGENT_ID");
+  }
+  if (!config.studioId) {
+    missing.push("VITE_RELEVANCE_STUDIO_ID/VITE_STUDIO_ID");
   }
 
   return missing;
@@ -149,6 +164,7 @@ export function logConfigStatus(config: RelevanceConfig): void {
     ["projectId", !!config.projectId],
     ["apiKey", !!config.apiKey],
     ["agentId", !!config.agentId],
+    ["studioId", !!config.studioId],
     ["toolId", !!config.toolId],
   ];
 
@@ -177,6 +193,8 @@ export function buildEndpointUrls(config: RelevanceConfig) {
   return {
     apiBase,
     agentTrigger: `${apiBase}/agents/trigger`,
+    studioTrigger: `${apiBase}/studios/${config.studioId}/trigger_async`,
+    studioJobStatus: (jobId: string) => `${apiBase}/studios/${config.studioId}/jobs/${jobId}`,
     toolTrigger: `${apiBase}/studios/${config.toolId}/trigger_async`,
     toolPoll: (jobId: string) => 
       `${apiBase}/studios/${config.toolId}/async_poll/${jobId}?ending_update_only=true`,
