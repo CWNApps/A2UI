@@ -3,7 +3,7 @@
  * 
  * Supports two endpoint formats:
  * 1. /run endpoint: {agent_id, conversation_id, message: {text}}
- * 2. /trigger endpoint: {role, input, context} - REQUIRES "role" property
+ * 2. /trigger endpoint: {agent_id, message: {role, content}} - REQUIRES "message.role" and "message.content"
  * 
  * The framework detects which format is needed and validates accordingly.
  */
@@ -26,16 +26,13 @@ export interface AgentRequestContext {
   metadata?: Record<string, any>;
 }
 
-// Trigger endpoint payload format (with role)
+// Trigger endpoint payload format (Relevance /latest/agents/trigger)
 export interface TriggerEndpointPayload {
-  role: string;
-  input: string;
-  context: {
-    conversation_id: string;
-    user_id?: string;
-    project_id?: string;
+  agent_id: string;
+  message: {
+    role: string;
+    content: string;
   };
-  parameters?: Record<string, any>;
 }
 
 // Run endpoint payload format (without role)
@@ -116,31 +113,21 @@ export function recursiveValidatePayload(payload: any, schema: JsonSchema): any 
 }
 
 /**
- * Get JSON Schema for /trigger endpoint (requires "role" property)
+ * Get JSON Schema for /trigger endpoint (requires message.role + message.content)
  */
 export function getTriggerEndpointSchema(): JsonSchema {
   return {
     type: "object",
-    required: ["role", "input", "context"],
+    required: ["agent_id", "message"],
     properties: {
-      role: {
-        type: "string",
-        default: "data_engine",
-      },
-      input: {
-        type: "string",
-      },
-      context: {
+      agent_id: { type: "string" },
+      message: {
         type: "object",
-        required: ["conversation_id"],
+        required: ["role", "content"],
         properties: {
-          conversation_id: { type: "string" },
-          user_id: { type: "string" },
-          project_id: { type: "string" },
+          role: { type: "string", default: "user" },
+          content: { type: "string" },
         },
-      },
-      parameters: {
-        type: "object",
       },
     },
   };
@@ -197,20 +184,17 @@ export function buildAgentRequestPayload(
     throw new Error("input must be a non-empty string");
   }
 
-  // Build payload for /trigger endpoint (requires "role" property)
+  // Build payload for /trigger endpoint (requires message.role + message.content)
   if (endpoint === "trigger") {
-    const payload: any = {
-      role: context?.metadata?.role || "data_engine", // Default role to prevent 422
-      input,
-      context: {
-        conversation_id: conversationId,
-        user_id: context?.userId,
-        project_id: context?.projectId,
+    const payload: TriggerEndpointPayload = {
+      agent_id: agentId,
+      message: {
+        role: (context?.metadata?.role as string) || "user",
+        content: input,
       },
-      parameters: context?.metadata || {},
     };
 
-    // Recursively validate to ensure "role" and other required fields are present
+    // Recursively validate to ensure required fields are present
     return recursiveValidatePayload(payload, getTriggerEndpointSchema());
   }
 
@@ -228,7 +212,7 @@ export function buildAgentRequestPayload(
 
 /**
  * Validates an agent request payload
- * For /trigger endpoint: ensures "role" property is present (prevents 422)
+ * For /trigger endpoint: ensures agent_id and message.{role,content} are present (prevents 422)
  * For /run endpoint: ensures agent_id, conversation_id, message are present
  */
 export function validateAgentRequestPayload(
@@ -240,28 +224,28 @@ export function validateAgentRequestPayload(
   }
 
   if (endpoint === "trigger") {
-    // Trigger endpoint validation - MUST have "role"
-    if (!payload.role || typeof payload.role !== "string") {
+    // Trigger endpoint validation - MUST have agent_id and message.role/content
+    if (!payload.agent_id || typeof payload.agent_id !== "string") {
       throw new Error(
-        'Missing required property "role": {missingProperty:"role"} - This is required for /trigger endpoint'
+        'Missing required property "agent_id": {missingProperty:"agent_id"} - This is required for /trigger endpoint'
       );
     }
 
-    if (!payload.input || typeof payload.input !== "string") {
+    if (!payload.message || typeof payload.message !== "object") {
       throw new Error(
-        'Missing required property "input": {missingProperty:"input"}'
+        'Missing required property "message": {missingProperty:"message"}'
       );
     }
 
-    if (!payload.context || typeof payload.context !== "object") {
+    if (!payload.message.role || typeof payload.message.role !== "string") {
       throw new Error(
-        'Missing required property "context": {missingProperty:"context"}'
+        'Missing required property "message.role": {missingProperty:"message.role"}'
       );
     }
 
-    if (!payload.context.conversation_id || typeof payload.context.conversation_id !== "string") {
+    if (!payload.message.content || typeof payload.message.content !== "string") {
       throw new Error(
-        'Missing required property "context.conversation_id": {missingProperty:"conversation_id"}'
+        'Missing required property "message.content": {missingProperty:"message.content"}'
       );
     }
 

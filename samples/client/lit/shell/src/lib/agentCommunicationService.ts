@@ -14,6 +14,7 @@ import { renderA2UIPayload } from "./a2uiRenderer";
 import { RecursiveQueryManager } from "./recursiveQueryEngine";
 import { ErrorHandler, AgentError, executeWithRetry, DEFAULT_RETRY_POLICY, validateHttpResponse } from "./errorHandler";
 import { ConfigManager } from "./configManager";
+import { createAuthHeader } from "./relevanceConfig";
 
 export interface AgentResponse {
   status: number;
@@ -201,12 +202,13 @@ export class AgentCommunicationService {
     const agentId = this.configManager.get("agentId");
     const apiKey = this.configManager.get("apiKey");
     const apiBaseUrl = this.configManager.get("apiBaseUrl");
+    const projectId = this.configManager.get("projectId");
 
-    if (!agentId || !apiKey) {
-      throw new AgentError("Missing required credentials (agentId or apiKey)");
+    if (!agentId || !apiKey || !projectId) {
+      throw new AgentError("Missing required credentials (agentId, projectId or apiKey)");
     }
 
-    // Build agent request payload for /trigger endpoint (requires "role" property)
+    // Build agent request payload for /trigger endpoint (requires message.role + message.content)
     const payload = buildAgentRequestPayload(
       agentId,
       conversationId,
@@ -214,7 +216,7 @@ export class AgentCommunicationService {
       {
         userId: this.configManager.get("userId"),
       },
-      "trigger" // Use trigger endpoint which requires "role" property
+      "trigger"
     );
 
     // Validate payload (throws if invalid)
@@ -241,8 +243,7 @@ export class AgentCommunicationService {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-          "X-API-Key": apiKey,
+          Authorization: createAuthHeader(projectId, apiKey),
         },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(this.configManager.get("queryTimeoutMs")),
