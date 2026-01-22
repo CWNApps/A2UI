@@ -147,7 +147,7 @@ describe("AgentCommunicationService", () => {
 
     // Mock fetch
     fetchMock = vi.fn();
-    global.fetch = fetchMock;
+    (global as any).fetch = fetchMock;
   });
 
   afterEach(() => {
@@ -367,7 +367,7 @@ describe("Integration: Full Agent Communication Flow", () => {
     );
 
     fetchMock = vi.fn();
-    global.fetch = fetchMock;
+    (global as any).fetch = fetchMock;
   });
 
   it("should handle complete agent communication with role", async () => {
