@@ -12,14 +12,21 @@ export interface RelevanceConfig {
 }
 
 /**
- * Normalizes stack base URL by removing trailing slashes and /latest suffix
- * This prevents /latest/latest in the final URLs
+ * Normalizes stack base URL to ensure exactly ONE "/latest" suffix
+ * - Trims whitespace
+ * - Removes trailing slashes
+ * - Removes all /latest occurrences (including /latest/latest)
+ * - Adds exactly one /latest
  */
 export function normalizeStackBase(url: string): string {
+  // Trim whitespace
+  let normalized = url.trim();
   // Remove trailing slashes
-  let normalized = url.replace(/\/+$/, "");
-  // Remove /latest suffix if present
-  normalized = normalized.replace(/\/latest$/, "");
+  normalized = normalized.replace(/\/+$/, "");
+  // Remove all /latest occurrences (including /latest/latest)
+  normalized = normalized.replace(/\/latest(\/?latest)*$/, "");
+  // Ensure exactly one /latest suffix
+  normalized = normalized + "/latest";
   return normalized;
 }
 

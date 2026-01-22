@@ -235,11 +235,13 @@ function toA2uiMessagesFromRelevance(
   }
   // === CHART RENDERING ===
   else if (isChart) {
-    const data = payload?.data || {};
-    if (typeof data === "object" && Object.keys(data).length > 0) {
+    // Safely extract data, guard against null/undefined
+    const safeData = (payload?.data && typeof payload.data === "object") ? payload.data : {};
+    const dataKeys = Object.keys(safeData);
+    if (dataKeys.length > 0) {
       // Render as key:value rows
       const rowIds: string[] = [];
-      for (const [key, val] of Object.entries(data)) {
+      for (const [key, val] of Object.entries(safeData)) {
         const rowId = genId("chart_row");
         const keyId = genId("chart_key");
         const valId = genId("chart_val");
@@ -381,9 +383,9 @@ class rh {
       console.log("[RelevanceRouter] Normalized base URL:", stackBase);
 
       // Step 3: Build endpoint URLs
-      const triggerToolUrl = new URL("/latest/studios/tools/trigger_async", stackBase).toString();
-      const pollToolUrl = new URL("/latest/studios/tools/poll_async", stackBase).toString();
-      const triggerAgentUrl = new URL("/latest/agents/trigger", stackBase).toString();
+      // Note: stackBase now includes /latest already, so use /studios/... not /latest/studios/...
+      const triggerToolUrl = new URL("/studios/" + toolId + "/trigger_async", stackBase).toString();
+      const triggerAgentUrl = new URL("/agents/trigger", stackBase).toString();
       console.log("[RelevanceRouter] Agent endpoint:", triggerAgentUrl);
       console.log("[RelevanceRouter] Tool endpoint:", triggerToolUrl);
 
@@ -405,9 +407,10 @@ class rh {
         );
       }
 
-      const authHeader = `${projectId}:${apiKey}`;
+      const authHeader = `Basic ${btoa(`${projectId}:${apiKey}`)}`;
       let payload: any = undefined;
       let routeUsed = "UNKNOWN";
+      let pollStopReason = "unknown";
 
       // Step 5: Route: Prefer AGENT if available, fall back to TOOL
       if (agentId) {
@@ -492,7 +495,7 @@ class rh {
 
         while (Date.now() - startTime < maxWaitMs) {
           const pollUrl = new URL(
-            `/latest/studios/tools/poll_async/${jobId}?ending_update_only=true`,
+            `/studios/${toolId}/async_poll/${jobId}?ending_update_only=true`,
             stackBase
           ).toString();
 
@@ -510,24 +513,28 @@ class rh {
           const pollData = await pollResp.json();
 
           if (pollData.type === "complete") {
-            // Extract from updates
+            // Extract from updates - safely handle null/undefined
             if (pollData.updates && Array.isArray(pollData.updates)) {
               for (let i = pollData.updates.length - 1; i >= 0; i--) {
                 const update = pollData.updates[i];
-                if (update?.payload) {
-                  payload = update.payload;
-                  break;
-                } else if (update?.output) {
-                  payload = update.output;
-                  break;
+                if (update && typeof update === "object") {
+                  if (update.payload) {
+                    payload = update.payload;
+                    break;
+                  } else if (update.output) {
+                    payload = update.output;
+                    break;
+                  }
                 }
               }
             }
-            console.log("[RelevanceRouter] Tool completed");
+            pollStopReason = "complete";
+            console.log("[RelevanceRouter] Tool completed (poll attempt #" + pollCount + ")");
             break;
           }
 
           if (pollData.type === "error" || pollData.error) {
+            pollStopReason = "error";
             throw new Error(pollData.error || "Tool execution error");
           }
 
@@ -538,13 +545,32 @@ class rh {
         }
 
         if (!payload) {
+          pollStopReason = "timeout";
           throw new Error("Tool execution timed out or returned no payload");
         }
       }
 
       // Step 6: Convert payload to A2UI messages
+      // Log what we're rendering for debugging
+      let componentType = "unknown";
+      let rowCount = 0;
+      if (typeof payload === "string") {
+        componentType = "text";
+      } else if (payload?.component === "table" || (payload?.data?.rows && Array.isArray(payload.data.rows))) {
+        componentType = "table";
+        rowCount = payload?.data?.rows?.length || 0;
+      } else if (payload?.component === "metric") {
+        componentType = "metric";
+      } else if (payload?.component === "chart") {
+        componentType = "chart";
+      } else if (payload?.component === "graph") {
+        componentType = "graph";
+      } else if (payload && typeof payload === "object") {
+        componentType = "json";
+      }
+
       const messages = toA2uiMessagesFromRelevance(payload, "Result");
-      console.log(`[RelevanceRouter] Route: ${routeUsed}, Messages: ${messages.length}`);
+      console.log(`[RelevanceRouter] Route: ${routeUsed}, Stop: ${pollStopReason}, Type: ${componentType}(${rowCount}), Messages: ${messages.length}`);
 
       return messages;
     } catch (err: any) {
