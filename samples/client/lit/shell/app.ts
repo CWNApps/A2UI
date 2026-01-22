@@ -417,7 +417,7 @@ class rh {
         const triggerBody = {
           agent_id: agentId,
           conversation_id: this.#getConversationId(),
-          message: { text: t },
+          message: { role: "user", content: t },
         };
 
         const triggerResp = await fetch(triggerAgentUrl, {
