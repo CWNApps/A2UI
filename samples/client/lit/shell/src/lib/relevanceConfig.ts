@@ -41,12 +41,53 @@ export function normalizeStackBase(url: string): string {
 }
 
 /**
- * Builds API base URL with exactly one /latest suffix
- * Returns: {stackBase}/latest
+ * Normalize a URL path by removing duplicate adjacent segments recursively.
+ * E.g., 'https://example.com/latest/latest' -> 'https://example.com/latest'
+ * @param url The input URL string
+ * @returns Normalized URL string without duplicated path segments
+ */
+function normalizeUrlPath(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const segments = parsed.pathname.split('/').filter(Boolean);
+
+    // Recursively remove consecutive duplicate segments
+    const dedupedSegments = segments.reduce<string[]>((acc, segment) => {
+      if (acc.length === 0 || acc[acc.length - 1] !== segment) {
+        acc.push(segment);
+      }
+      return acc;
+    }, []);
+
+    parsed.pathname = '/' + dedupedSegments.join('/');
+    return parsed.toString();
+  } catch {
+    // If URL parsing fails, fallback to original string
+    return url;
+  }
+}
+
+/**
+ * Builds API base URL by normalizing the stackBase and ensuring it ends with '/latest'
+ * without duplicated segments.
+ * 
+ * Fixes issue where stackBase already ends with /latest but buildApiBase appends it again,
+ * causing /latest/latest duplication that leads to 404 errors during job polling.
+ * 
+ * Examples:
+ *   "https://api-xxx.com/latest" -> "https://api-xxx.com/latest"
+ *   "https://api-xxx.com/latest/latest" -> "https://api-xxx.com/latest"
+ *   "https://api-xxx.com" -> "https://api-xxx.com/latest"
  */
 export function buildApiBase(stackBase: string): string {
   const normalized = normalizeStackBase(stackBase);
-  return `${normalized}/latest`;
+  const cleaned = normalizeUrlPath(normalized);
+
+  if (!cleaned.endsWith('/latest')) {
+    // Append '/latest' if missing
+    return cleaned.replace(/\/+$/, '') + '/latest';
+  }
+  return cleaned;
 }
 
 /**
