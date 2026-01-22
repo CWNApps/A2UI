@@ -353,6 +353,46 @@ class rh {
   #config: RelevanceConfig | null = null;
   #envError: string | null = null;
 
+  // Polls /jobs/{job_id} with exponential backoff until completion
+  private async pollJobStatus(
+    apiBase: string,
+    jobId: string,
+    authHeader: string,
+    maxRetries = 12,
+    initialDelayMs = 1000,
+    maxDelayMs = 30000
+  ): Promise<any> {
+    let delayMs = initialDelayMs;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const jobUrl = `${apiBase}/jobs/${jobId}`;
+      const res = await fetch(jobUrl, {
+        headers: { Authorization: authHeader },
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Job poll failed (${res.status}): ${errText || res.statusText}`);
+      }
+
+      const jobStatus = await res.json();
+      const state = jobStatus.state;
+      console.log(`[RelevanceRouter] Job poll #${attempt}: state=${state}`);
+
+      if (state === "success") return jobStatus;
+      if (state === "failure") {
+        const errMsg = jobStatus.error || jobStatus.message || "Job failed";
+        throw new Error(errMsg);
+      }
+
+      // waiting-for-capacity / running / queued -> continue with backoff
+      await new Promise((r) => setTimeout(r, delayMs));
+      delayMs = Math.min(delayMs * 2, maxDelayMs);
+    }
+
+    throw new Error("Job polling reached max retries without completion");
+  }
+
   constructor() {
     // Check for environment variable errors during init
     const config = getRelevanceConfig();
@@ -432,12 +472,25 @@ class rh {
 
         const respData = await triggerResp.json();
         console.log("[RelevanceRouter] Agent response received");
+        const jobInfo = (respData as any).job_info || (respData as any).jobInfo || (respData as any).job;
 
-        // Use robust extraction
-        const extracted = extractUiPayload(respData);
-        payload = extracted.payload;
-        if (extracted.message) {
-          console.log(`[RelevanceRouter] Agent message: ${extracted.message}`);
+        // If server returns async job info, poll until completion
+        if (jobInfo?.job_id) {
+          const jobId = jobInfo.job_id;
+          console.log(`[RelevanceRouter] Agent job queued: ${jobId} (state=${jobInfo.state})`);
+          const jobResult = await this.pollJobStatus(apiBase, jobId, authHeader);
+          const extracted = extractUiPayload(jobResult);
+          payload = extracted.payload ?? jobResult;
+          if (extracted.message) {
+            console.log(`[RelevanceRouter] Agent message: ${extracted.message}`);
+          }
+        } else {
+          // Synchronous response path
+          const extracted = extractUiPayload(respData);
+          payload = extracted.payload;
+          if (extracted.message) {
+            console.log(`[RelevanceRouter] Agent message: ${extracted.message}`);
+          }
         }
       } 
       // === STEP 6: Fallback to TOOL if AGENT not configured ===

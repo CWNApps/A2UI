@@ -46,16 +46,16 @@ export function validateAgentPayload(payload: unknown): AgentPayload {
   }
 
   if (!p.input || typeof p.input !== "string") {
-    throw new Error('Missing required field: "input" (string)');
+    throw new Error('Missing required field: "input"');
   }
 
   if (!p.context || typeof p.context !== "object") {
-    throw new Error('Missing required field: "context" (object)');
+    throw new Error('Missing required field: "context"');
   }
 
   const ctx = p.context as Record<string, unknown>;
   if (!ctx.conversation_id || typeof ctx.conversation_id !== "string") {
-    throw new Error('Missing required field: "context.conversation_id" (string)');
+    throw new Error('Missing required field: "context.conversation_id"');
   }
 
   // Build valid payload
