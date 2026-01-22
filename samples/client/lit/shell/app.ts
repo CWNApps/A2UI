@@ -365,20 +365,62 @@ class rh {
   ): Promise<any> {
     let delayMs = initialDelayMs;
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const jobUrl = `${apiBase}/studios/${studioId}/jobs/${jobId}`;
-      const res = await fetch(jobUrl, {
-        headers: { Authorization: authHeader },
-      });
+    // Some stacks expose job polling at /jobs/{job_id} instead of /studios/{studioId}/jobs/{job_id}.
+    // Try multiple endpoint variations to maximize compatibility.
+    const jobEndpoints = [
+      `${apiBase}/studios/${studioId}/jobs/${jobId}`,
+      `${apiBase}/jobs/${jobId}`,
+      `${apiBase}/api/jobs/${jobId}`,
+    ];
 
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Job poll failed (${res.status}): ${errText || res.statusText}`);
+    console.log(`[RelevanceRouter] Job polling with jobId=${jobId}, trying ${jobEndpoints.length} endpoint(s):`);
+    jobEndpoints.forEach((ep, i) => console.log(`  [${i}] ${ep}`));
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      let lastError: string | null = null;
+      let jobStatus: any = null;
+      let state: string | undefined;
+
+      for (let i = 0; i < jobEndpoints.length; i++) {
+        const jobUrl = jobEndpoints[i];
+        const res = await fetch(jobUrl, {
+          headers: { Authorization: authHeader },
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+
+          // Try next endpoint on 404, otherwise throw
+          if (res.status === 404 && i < jobEndpoints.length - 1) {
+            console.warn(
+              `[RelevanceRouter] Job poll 404 on attempt ${attempt}, endpoint ${i}/${jobEndpoints.length - 1}, trying next: ${jobEndpoints[i + 1]}`
+            );
+            continue;
+          }
+
+          lastError = `[${res.status}] ${errText.substring(0, 200)}`;
+          
+          if (i < jobEndpoints.length - 1) {
+            console.warn(
+              `[RelevanceRouter] Job poll failed on endpoint ${i}/${jobEndpoints.length - 1} (${res.status}), trying next: ${jobEndpoints[i + 1]}`
+            );
+            continue;
+          }
+
+          throw new Error(`Job poll failed (${res.status}): ${errText}`);
+        }
+
+        jobStatus = await res.json();
+        state = jobStatus.state;
+        console.log(`[RelevanceRouter] Job poll #${attempt}: state=${state}, url=${jobUrl}`);
+        break;
       }
 
-      const jobStatus = await res.json();
-      const state = jobStatus.state;
-      console.log(`[RelevanceRouter] Job poll #${attempt}: state=${state}`);
+      if (!jobStatus) {
+        throw new Error(
+          `Job poll failed: no endpoints responded successfully. Tried: ${jobEndpoints.join(", ")}. Last error: ${lastError}`
+        );
+      }
 
       if (state === "success") return jobStatus;
       if (state === "failure") {
