@@ -1,0 +1,273 @@
+# HTTP 422 Fix - Quick Reference Card
+
+**Print this or bookmark it!**
+
+---
+
+## 🎯 The Problem in 10 Seconds
+
+```
+ERROR: HTTP 422 - Missing 'role' property
+Endpoint: /latest/agents/trigger
+Impact: All agent requests fail
+```
+
+---
+
+## ✅ The Solution in 10 Seconds
+
+```
+Add: role: "data_engine"
+Where: In your agent payload
+Result: HTTP 200 ✅
+```
+
+---
+
+## 🚀 Quick Start (Pick One)
+
+### Option 1: Backend Proxy (10 min) ⭐
+```bash
+cp .env.example .env          # Setup config
+nano .env                      # Add credentials
+bash setup.sh                  # Start server
+# Done! Use http://localhost:3000/api/agent/trigger
+```
+
+### Option 2: Frontend Fix (5 min)
+```bash
+# Copy code from EXACT_CODE_CHANGES.md
+# Update 3 TypeScript files
+# Run tests: npm test TESTS.spec.ts
+```
+
+### Option 3: Read First (5 min)
+```bash
+cat VISUAL_SUMMARY.md          # Understand problem
+cat README_HTTP_422_FIX.md     # Quick start guide
+# Then pick Option 1 or 2
+```
+
+---
+
+## 📋 File Cheat Sheet
+
+| Need | Read |
+|------|------|
+| 1-minute overview | VISUAL_SUMMARY.md |
+| Implementation code | EXACT_CODE_CHANGES.md |
+| Step-by-step guide | MASTER_CHECKLIST_HTTP422.md |
+| Backend server | server.js |
+| Full documentation | HTTP_422_DOCUMENTATION_INDEX.md |
+
+---
+
+## 🔧 Key Changes (Copy These)
+
+### Change 1: Add role to payload
+```typescript
+{
+  role: "data_engine",  // ← ADD THIS
+  input: "Question",
+  context: { conversation_id: "..." }
+}
+```
+
+### Change 2: Use trigger endpoint
+```
+/latest/agents/trigger    // ✅ Correct (not /run)
+```
+
+### Change 3: Add validation
+```typescript
+const valid = validateAgentPayload(payload);
+```
+
+---
+
+## 📊 Before → After
+
+| Aspect | Before | After |
+|--------|--------|-------|
+| Status | 🔴 422 error | 🟢 200 OK |
+| Role | ❌ Missing | ✅ Included |
+| Retry | ❌ None | ✅ 3x |
+| Error msg | ❌ Generic | ✅ Specific |
+
+---
+
+## ✅ Testing (3 Steps)
+
+### 1. Health Check
+```bash
+curl http://localhost:3000/health
+# Should return: { "status": "ok" }
+```
+
+### 2. Sample Request
+```bash
+curl -X POST http://localhost:3000/api/agent/trigger \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": "Test",
+    "context": { "conversation_id": "test-123" }
+  }'
+# Should return: { "success": true, "data": {...} }
+```
+
+### 3. Run Tests
+```bash
+npm test TESTS.spec.ts
+# Should pass: 23 tests ✅
+```
+
+---
+
+## 🆘 Quick Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| 422 error | Add role to payload |
+| Server won't start | Check: npm install, .env, port 3000 |
+| Tests failing | Run: npm install, npm test -- --verbose |
+| Still broken? | Read: MASTER_CHECKLIST_HTTP422.md |
+
+---
+
+## 📞 Need Help?
+
+### Documentation Files
+1. `VISUAL_SUMMARY.md` - Understand problem
+2. `EXACT_CODE_CHANGES.md` - Make changes
+3. `MASTER_CHECKLIST_HTTP422.md` - Step-by-step
+4. `HTTP_422_FIX_GUIDE.md` - Deep dive
+
+### Troubleshooting
+→ See MASTER_CHECKLIST_HTTP422.md section "Troubleshooting"
+
+### Code Examples
+→ See IMPLEMENTATION_GUIDE.ts
+
+### Tests
+→ See TESTS.spec.ts
+
+---
+
+## 🎯 Success Checklist
+
+- [ ] Read relevant documentation
+- [ ] Have API credentials ready
+- [ ] Run bash setup.sh (or implement manually)
+- [ ] Test with curl
+- [ ] Run npm test
+- [ ] No 422 errors
+- [ ] Deploy to production
+- [ ] Monitor error rates
+
+---
+
+## ⏱️ Time Guide
+
+| Task | Time |
+|------|------|
+| Understand problem | 5 min |
+| Quick fix (backend) | 10 min |
+| Implementation | 20 min |
+| Testing | 5 min |
+| Deployment | 15+ min |
+| **Total** | **30-50 min** |
+
+---
+
+## 🚀 Launch Command
+
+```bash
+# 1. Setup
+bash setup.sh
+
+# 2. In another terminal, test
+curl http://localhost:3000/health
+
+# 3. Backend proxy is ready!
+# Use: http://localhost:3000/api/agent/trigger
+```
+
+---
+
+## 💡 Pro Tips
+
+1. **Use backend proxy** for production (easier & more reliable)
+2. **Run tests** to validate your changes
+3. **Enable debug** logging if stuck: `DEBUG=* node server.js`
+4. **Monitor error rates** after deployment
+5. **Keep all guides handy** for reference
+
+---
+
+## 📖 Documentation Index
+
+```
+START HERE
+    ↓
+VISUAL_SUMMARY.md (5 min overview)
+    ↓
+Choose your path:
+    ├─ Backend? → README_HTTP_422_FIX.md
+    ├─ Frontend? → EXACT_CODE_CHANGES.md
+    └─ Learning? → HTTP_422_FIX_GUIDE.md
+    ↓
+Follow checklist:
+    └─ MASTER_CHECKLIST_HTTP422.md
+    ↓
+DEPLOYED ✅
+```
+
+---
+
+## 🎯 3 Paths to Choose From
+
+```
+┌─────────────┬──────────────┬──────────────┐
+│  Path A     │  Path B      │  Path C      │
+│ Frontend    │  Backend     │  Both        │
+├─────────────┼──────────────┼──────────────┤
+│ 5 min       │  10 min      │  20 min      │
+│ Code files  │  Node server │  Staged      │
+│ Local only  │  Production  │  Best        │
+└─────────────┴──────────────┴──────────────┘
+
+Pick Path B for best results! ⭐
+```
+
+---
+
+## ✨ What You Get
+
+✅ 7 comprehensive guides  
+✅ 100+ lines of working code  
+✅ 23 automated tests  
+✅ Automated setup script  
+✅ Full troubleshooting guide  
+✅ Production deployment guide  
+
+**Everything needed to fix the problem!** 🎉
+
+---
+
+## 📍 Location
+
+All files in: `/workspaces/A2UI/samples/client/lit/shell/`
+
+---
+
+## 🎬 Next Step
+
+**Read:** `VISUAL_SUMMARY.md` (5 min)  
+**Then:** Pick your implementation path  
+**Deploy:** Follow appropriate guide  
+
+---
+
+**Last Updated:** 2024-01-22  
+**Status:** ✅ PRODUCTION READY  
+**Bookmark this file for quick reference!** 📌

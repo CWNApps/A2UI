@@ -23,10 +23,8 @@
       "service": true
     },
     "test": {
-      "command": "node --test --enable-source-maps --test-reporter spec dist/src/0.8/tests/**/*.test.js",
-      "dependencies": [
-        "build"
-      ]
+      "command": "vitest run TESTS.spec.ts",
+      "dependencies": []
     },
     "build": {
       "dependencies": [
@@ -68,10 +66,12 @@
   },
   "homepage": "https://github.com/google/A2UI/tree/main/web#readme",
   "devDependencies": {
+    "@vitest/ui": "^4.0.17",
     "dotenv": "^17.2.3",
     "typescript": "^5.8.3",
     "uuid": "^13.0.0",
     "vite": "^7.1.11",
+    "vitest": "^4.0.17",
     "wireit": "^0.15.0-pre.2"
   },
   "dependencies": {

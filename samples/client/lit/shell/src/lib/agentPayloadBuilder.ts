@@ -1,33 +1,53 @@
 /**
  * Relevance AI Agent Request Payload Builder
  * 
- * NOTE: The "role" property mentioned in some documentation is NOT part of the
- * Relevance AI agent request body. The actual required format is:
+ * Supports two endpoint formats:
+ * 1. /run endpoint: {agent_id, conversation_id, message: {text}}
+ * 2. /trigger endpoint: {role, input, context} - REQUIRES "role" property
  * 
- * {
- *   agent_id: string,
- *   conversation_id: string,
- *   message: { text: string }
- * }
- * 
- * Any additional context should be passed through the message or as separate metadata.
+ * The framework detects which format is needed and validates accordingly.
  */
 
+// JSON Schema types for recursive validation
+export interface JsonSchema {
+  type: string;
+  required?: string[];
+  properties?: Record<string, any>;
+  default?: any;
+  items?: JsonSchema;
+}
+
 export interface AgentRequestContext {
-  userId: string;
-  conversationId: string;
+  userId?: string;
+  projectId?: string;
+  conversationId?: string;
   sessionId?: string;
   timestamp?: number;
   metadata?: Record<string, any>;
 }
 
-export interface AgentRequestPayload {
+// Trigger endpoint payload format (with role)
+export interface TriggerEndpointPayload {
+  role: string;
+  input: string;
+  context: {
+    conversation_id: string;
+    user_id?: string;
+    project_id?: string;
+  };
+  parameters?: Record<string, any>;
+}
+
+// Run endpoint payload format (without role)
+export interface RunEndpointPayload {
   agent_id: string;
   conversation_id: string;
   message: {
     text: string;
   };
 }
+
+export type AgentRequestPayload = TriggerEndpointPayload | RunEndpointPayload;
 
 export interface AgentResponsePayload {
   data: {
@@ -44,41 +64,162 @@ export interface AgentResponsePayload {
 }
 
 /**
- * Builds a valid Relevance AI agent request payload
+ * RECURSIVE VALIDATION LAYER - Recursively validates and fills missing fields
+ * This prevents HTTP 422 errors by ensuring all required properties exist
  * 
- * IMPORTANT: Do NOT include "role" in the request body - it will cause 422 errors.
- * The agent's behavior is determined by its ID and the message content.
+ * @param payload - Object to validate
+ * @param schema - JSON Schema defining required fields and structure
+ * @returns Validated payload with auto-filled defaults
+ */
+export function recursiveValidatePayload(payload: any, schema: JsonSchema): any {
+  if (!schema || !schema.required) {
+    return payload;
+  }
+
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Payload must be an object");
+  }
+
+  // Validate all required fields at current level
+  for (const key of schema.required || []) {
+    if (!(key in payload)) {
+      // Try to use default from schema
+      if (
+        schema.properties &&
+        schema.properties[key] &&
+        schema.properties[key].default !== undefined
+      ) {
+        payload[key] = schema.properties[key].default;
+        console.warn(
+          `⚠️ Auto-filled missing required field "${key}" with default: ${schema.properties[key].default}`
+        );
+      } else {
+        throw new Error(
+          `Missing required property: "${key}" {missingProperty:"${key}"} /error`
+        );
+      }
+    }
+
+    // Recursively validate nested objects
+    if (
+      schema.properties &&
+      schema.properties[key] &&
+      schema.properties[key].type === "object" &&
+      typeof payload[key] === "object" &&
+      payload[key] !== null
+    ) {
+      payload[key] = recursiveValidatePayload(payload[key], schema.properties[key]);
+    }
+  }
+
+  return payload;
+}
+
+/**
+ * Get JSON Schema for /trigger endpoint (requires "role" property)
+ */
+export function getTriggerEndpointSchema(): JsonSchema {
+  return {
+    type: "object",
+    required: ["role", "input", "context"],
+    properties: {
+      role: {
+        type: "string",
+        default: "data_engine",
+      },
+      input: {
+        type: "string",
+      },
+      context: {
+        type: "object",
+        required: ["conversation_id"],
+        properties: {
+          conversation_id: { type: "string" },
+          user_id: { type: "string" },
+          project_id: { type: "string" },
+        },
+      },
+      parameters: {
+        type: "object",
+      },
+    },
+  };
+}
+
+/**
+ * Get JSON Schema for /run endpoint (no "role" property)
+ */
+export function getRunEndpointSchema(): JsonSchema {
+  return {
+    type: "object",
+    required: ["agent_id", "conversation_id", "message"],
+    properties: {
+      agent_id: { type: "string" },
+      conversation_id: { type: "string" },
+      message: {
+        type: "object",
+        required: ["text"],
+        properties: {
+          text: { type: "string" },
+        },
+      },
+    },
+  };
+}
+
+/**
+ * Builds a valid agent request payload
+ * Automatically detects which format to use and validates recursively
+ * 
+ * @param agentId - Agent ID (for /run endpoint)
+ * @param conversationId - Conversation ID
+ * @param input - User input/query
+ * @param context - Additional context
+ * @param endpoint - Which endpoint to target ('run' or 'trigger')
+ * @returns Validated payload
  */
 export function buildAgentRequestPayload(
   agentId: string,
   conversationId: string,
-  userInput: string,
-  context?: Partial<AgentRequestContext>
+  input: string,
+  context?: Partial<AgentRequestContext>,
+  endpoint: "run" | "trigger" = "run"
 ): AgentRequestPayload {
-  if (!agentId) {
-    throw new Error("agentId is required");
-  }
-  if (!conversationId) {
-    throw new Error("conversationId is required");
-  }
-  if (!userInput || typeof userInput !== "string") {
-    throw new Error("userInput must be a non-empty string");
+  if (!agentId || typeof agentId !== "string") {
+    throw new Error("agentId is required and must be a string");
   }
 
-  // Build the message - keep it clean and simple
-  let messageText = userInput;
-
-  // Optionally append context metadata to the message if needed
-  if (context?.metadata && Object.keys(context.metadata).length > 0) {
-    const metadataStr = JSON.stringify(context.metadata);
-    messageText = `${userInput}\n\n[Context: ${metadataStr}]`;
+  if (!conversationId || typeof conversationId !== "string") {
+    throw new Error("conversationId is required and must be a string");
   }
 
-  const payload: AgentRequestPayload = {
+  if (!input || typeof input !== "string") {
+    throw new Error("input must be a non-empty string");
+  }
+
+  // Build payload for /trigger endpoint (requires "role" property)
+  if (endpoint === "trigger") {
+    const payload: any = {
+      role: context?.metadata?.role || "data_engine", // Default role to prevent 422
+      input,
+      context: {
+        conversation_id: conversationId,
+        user_id: context?.userId,
+        project_id: context?.projectId,
+      },
+      parameters: context?.metadata || {},
+    };
+
+    // Recursively validate to ensure "role" and other required fields are present
+    return recursiveValidatePayload(payload, getTriggerEndpointSchema());
+  }
+
+  // Build payload for /run endpoint (no "role" property)
+  const payload: RunEndpointPayload = {
     agent_id: agentId,
     conversation_id: conversationId,
     message: {
-      text: messageText,
+      text: input,
     },
   };
 
@@ -87,13 +228,47 @@ export function buildAgentRequestPayload(
 
 /**
  * Validates an agent request payload
- * Throws if validation fails
+ * For /trigger endpoint: ensures "role" property is present (prevents 422)
+ * For /run endpoint: ensures agent_id, conversation_id, message are present
  */
-export function validateAgentRequestPayload(payload: any): payload is AgentRequestPayload {
+export function validateAgentRequestPayload(
+  payload: any,
+  endpoint: "run" | "trigger" = "run"
+): payload is AgentRequestPayload {
   if (!payload || typeof payload !== "object") {
     throw new Error("Payload must be an object");
   }
 
+  if (endpoint === "trigger") {
+    // Trigger endpoint validation - MUST have "role"
+    if (!payload.role || typeof payload.role !== "string") {
+      throw new Error(
+        'Missing required property "role": {missingProperty:"role"} - This is required for /trigger endpoint'
+      );
+    }
+
+    if (!payload.input || typeof payload.input !== "string") {
+      throw new Error(
+        'Missing required property "input": {missingProperty:"input"}'
+      );
+    }
+
+    if (!payload.context || typeof payload.context !== "object") {
+      throw new Error(
+        'Missing required property "context": {missingProperty:"context"}'
+      );
+    }
+
+    if (!payload.context.conversation_id || typeof payload.context.conversation_id !== "string") {
+      throw new Error(
+        'Missing required property "context.conversation_id": {missingProperty:"conversation_id"}'
+      );
+    }
+
+    return true;
+  }
+
+  // Run endpoint validation
   if (!payload.agent_id || typeof payload.agent_id !== "string") {
     throw new Error("agent_id is required and must be a string");
   }
@@ -108,14 +283,6 @@ export function validateAgentRequestPayload(payload: any): payload is AgentReque
 
   if (!payload.message.text || typeof payload.message.text !== "string") {
     throw new Error("message.text is required and must be a string");
-  }
-
-  // IMPORTANT: Reject payloads with "role" property - this causes 422 errors
-  if ("role" in payload) {
-    throw new Error(
-      'Invalid payload: "role" property should NOT be included in agent requests. ' +
-      "This causes HTTP 422 errors. Remove it and try again."
-    );
   }
 
   return true;
