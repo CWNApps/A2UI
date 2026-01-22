@@ -340,8 +340,7 @@ export class AgentCommunicationService {
         jobStatus = bodyText ? JSON.parse(bodyText) : {};
       } catch (err) {
         throw new AgentError(`Failed to parse job status response: ${bodyText}`, res.status, {
-          url,
-          attempt,
+          endpoint: url,
         });
       }
 
@@ -350,8 +349,7 @@ export class AgentCommunicationService {
 
       if (!res.ok) {
         throw new AgentError(`Job poll failed (${res.status}): ${bodyText || res.statusText}`, res.status, {
-          url,
-          attempt,
+          endpoint: url,
           retryable: res.status >= 500 || res.status === 429,
         });
       }
@@ -362,17 +360,18 @@ export class AgentCommunicationService {
 
       if (state === "failure" || state === "failed" || state === "error") {
         const errMsg = jobStatus?.error || jobStatus?.message || "Job failed";
-        throw new AgentError(errMsg, res.status, { url, attempt });
+        throw new AgentError(errMsg, res.status, { endpoint: url });
       }
 
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       delayMs = Math.min(delayMs * 2, maxDelayMs);
     }
 
-    throw new AgentError("Job polling reached max retries without completion", 504, {
-      jobId,
-      studioId,
-    });
+    throw new AgentError(
+      `Job polling reached max retries without completion (job=${jobId}, studio=${studioId})`,
+      504,
+      { endpoint: `${apiBaseUrl}/studios/${studioId}/jobs/${jobId}` }
+    );
   }
 
   /**
